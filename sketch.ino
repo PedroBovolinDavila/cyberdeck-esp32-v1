@@ -7,6 +7,7 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <time.h>
+#include <Preferences.h>
 
 // ---------------- PINAGEM ----------------
 #define PIN_SDA       21
@@ -46,10 +47,36 @@ enum Tela {
   TELA_TAROT,
   TELA_PET_QUARTO,
   TELA_PET_STATUS,
-  TELA_PET_ACOES
+  TELA_PET_ACOES,
+  TELA_CONFIGURACOES,
+  TELA_CFG_TELA,
+  TELA_CFG_SOM,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
+
+// ===== CONFIGURACOES DO CYBERDECK =====
+Preferences preferencias;
+
+int cfgContraste = 200;        // 0 a 255
+int cfgVolume = 2;             // 0=mudo, 1=baixo, 2=medio, 3=alto
+bool cfgSomTeclas = true;
+int cfgTempoDescanso = 60;     // segundos; 0 = desativado
+
+// ===== MENU CONFIGURACOES =====
+int cfgCategoria = 0;
+int cfgOpcao = 0;
+int cfgTelaOpcao = 0;
+
+const char* cfgCategorias[] = {
+  "TELA",
+  "SOM",
+  "SISTEMA"
+};
+
+const int CFG_NUM_CATEGORIAS = 3;
+
+unsigned long cfgUltimaEstrela = 0;
 
 // (precisa ficar aqui no topo: o Arduino gera os prototipos das funcoes
 //  antes de qualquer funcao, e eles usam este tipo)
@@ -173,6 +200,34 @@ const Estrela estrelas[] = {
   { 92, 24, 0, 1400,  500 }, {120, 52, 0, 2000, 1500 },
   { 80, 12, 0, 1100,  250 }, { 44, 12, 0, 1250,  850 }
 };
+
+void carregarConfiguracoes() {
+  preferencias.begin("cyberdeck", false);
+
+  cfgContraste = preferencias.getInt("contraste", 200);
+  cfgVolume = preferencias.getInt("volume", 2);
+  cfgSomTeclas = preferencias.getBool("somTeclas", true);
+  cfgTempoDescanso = preferencias.getInt("descanso", 60);
+
+  // Protecao contra valores invalidos
+  cfgContraste = constrain(cfgContraste, 0, 255);
+  cfgVolume = constrain(cfgVolume, 0, 3);
+
+  if (cfgTempoDescanso != 0 &&
+      cfgTempoDescanso != 30 &&
+      cfgTempoDescanso != 60 &&
+      cfgTempoDescanso != 120 &&
+      cfgTempoDescanso != 300) {
+    cfgTempoDescanso = 60;
+  }
+}
+
+void salvarConfiguracoes() {
+  preferencias.putInt("contraste", cfgContraste);
+  preferencias.putInt("volume", cfgVolume);
+  preferencias.putBool("somTeclas", cfgSomTeclas);
+  preferencias.putInt("descanso", cfgTempoDescanso);
+}
 
 void desenhaEstrelas() {
   for (const Estrela &e : estrelas) {
@@ -585,6 +640,8 @@ void desenhaLua(int cx, int cy, int r, float p) {
   }
   display.drawCircle(cx, cy, r, WHITE);
 }
+
+
 
 // ============================================================
 //  MODULO RELOGIO
@@ -1381,6 +1438,12 @@ void telaMenu() {
       esperaSoltar();
       tPag = millis();
       telaAtual = TELA_RELOGIO;
+      return;
+    }
+    if (selecionado == 5) {            // CONFIGURACOES
+      esperaSoltar();
+      cfgCategoria = 0;
+      telaAtual = TELA_CONFIGURACOES;
       return;
     }
     if (selecionado == 8) {
@@ -2258,6 +2321,223 @@ void telaBoasVindas() {
   }
 }
 
+// -- CONFIGURACOES --
+
+void telaConfiguracoes() {
+  display.clearDisplay();
+
+  // Estrelinhas decorativas
+  for (int i = 0; i < 9; i++) {
+    int x = (i * 19 + 7) % 128;
+    int y = (i * 13 + 3) % 64;
+
+    if ((millis() / 350 + i) % 3 != 0) {
+      display.drawPixel(x, y, WHITE);
+    } else {
+      display.drawPixel(x - 1, y, WHITE);
+      display.drawPixel(x + 1, y, WHITE);
+      display.drawPixel(x, y - 1, WHITE);
+      display.drawPixel(x, y + 1, WHITE);
+    }
+  }
+
+  display.drawRoundRect(2, 2, 124, 60, 5, WHITE);
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(15, 7);
+  display.print("CONFIGURACOES");
+
+  display.drawFastHLine(8, 18, 112, WHITE);
+
+  for (int i = 0; i < CFG_NUM_CATEGORIAS; i++) {
+    int y = 23 + i * 12;
+
+    if (i == cfgCategoria) {
+      display.fillRoundRect(9, y - 2, 110, 11, 3, WHITE);
+      display.setTextColor(BLACK);
+      display.setCursor(15, y);
+      display.print(">");
+      display.print(cfgCategorias[i]);
+      display.setTextColor(WHITE);
+    } else {
+      display.setCursor(15, y);
+      display.print(" ");
+      display.print(cfgCategorias[i]);
+    }
+  }
+
+  display.display();
+}
+
+void controlarConfiguracoes() {
+  if (clicou(bUp, false)) {
+    cfgCategoria--;
+    if (cfgCategoria < 0) {
+      cfgCategoria = CFG_NUM_CATEGORIAS - 1;
+    }
+    somTique();
+    esperaSoltar();
+  }
+
+  if (clicou(bDown, false)) {
+    cfgCategoria++;
+    if (cfgCategoria >= CFG_NUM_CATEGORIAS) {
+      cfgCategoria = 0;
+    }
+    somTique();
+    esperaSoltar();
+  }
+
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
+
+  if (clicou(bOk, false)) {
+    somConfirma();
+    esperaSoltar();
+
+    if (cfgCategoria == 0) {
+      cfgTelaOpcao = 0;
+      telaAtual = TELA_CFG_TELA;
+    } else if (cfgCategoria == 1) {
+      telaAtual = TELA_CFG_SOM;
+    } else {
+      cfgOpcao = 0;
+      // O submenu SISTEMA sera implementado na proxima etapa.
+    }
+  }
+}
+
+void telaConfigTela() {
+  display.clearDisplay();
+
+  // Estrelinhas animadas
+  for (int i = 0; i < 8; i++) {
+    int x = (i * 23 + 11) % 128;
+    int y = (i * 17 + 5) % 64;
+
+    if ((millis() / 300 + i) % 3 == 0) {
+      display.drawPixel(x, y, WHITE);
+      display.drawPixel(x - 1, y, WHITE);
+      display.drawPixel(x + 1, y, WHITE);
+      display.drawPixel(x, y - 1, WHITE);
+      display.drawPixel(x, y + 1, WHITE);
+    } else {
+      display.drawPixel(x, y, WHITE);
+    }
+  }
+
+  display.drawRoundRect(2, 2, 124, 60, 5, WHITE);
+
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(12, 7);
+  display.print("CONFIG > TELA");
+
+  display.drawFastHLine(8, 18, 112, WHITE);
+
+  // Opcao 0: contraste
+  if (cfgTelaOpcao == 0) {
+    display.fillRoundRect(7, 22, 114, 19, 3, WHITE);
+    display.setTextColor(BLACK);
+  } else {
+    display.setTextColor(WHITE);
+  }
+
+  display.setCursor(11, 24);
+  display.print("Contraste");
+  display.setCursor(83, 24);
+  display.print(cfgContraste);
+
+  // Barra de contraste
+  int largura = map(cfgContraste, 0, 255, 0, 48);
+  display.drawRect(68, 34, 50, 4, cfgTelaOpcao == 0 ? BLACK : WHITE);
+  if (largura > 0) {
+    display.fillRect(69, 35, largura, 2,
+                     cfgTelaOpcao == 0 ? BLACK : WHITE);
+  }
+
+  // Opcao 1: tempo de descanso
+  display.setTextColor(cfgTelaOpcao == 1 ? BLACK : WHITE);
+  if (cfgTelaOpcao == 1) {
+    display.fillRoundRect(7, 44, 114, 13, 3, WHITE);
+  }
+
+  display.setCursor(11, 47);
+  display.print("Descanso:");
+
+  display.setCursor(72, 47);
+  if (cfgTempoDescanso == 0) {
+    display.print("OFF");
+  } else if (cfgTempoDescanso == 30) {
+    display.print("30s");
+  } else if (cfgTempoDescanso == 60) {
+    display.print("1min");
+  } else if (cfgTempoDescanso == 120) {
+    display.print("2min");
+  } else {
+    display.print("5min");
+  }
+
+  display.display();
+}
+
+void controlarConfigTela() {
+  if (clicou(bBack, false)) {
+    somVoltar();
+    salvarConfiguracoes();
+    esperaSoltar();
+    telaAtual = TELA_CONFIGURACOES;
+    return;
+  }
+
+  if (clicou(bUp, false)) {
+    if (cfgTelaOpcao > 0) {
+      cfgTelaOpcao--;
+    } else {
+      if (cfgContraste < 255) cfgContraste += 5;
+      cfgContraste = constrain(cfgContraste, 0, 255);
+      display.ssd1306_command(SSD1306_SETCONTRAST);
+      display.ssd1306_command(cfgContraste);
+    }
+
+    somTique();
+    esperaSoltar();
+  }
+
+  if (clicou(bDown, false)) {
+    if (cfgTelaOpcao == 0) {
+      if (cfgContraste > 0) cfgContraste -= 5;
+      cfgContraste = constrain(cfgContraste, 0, 255);
+      display.ssd1306_command(SSD1306_SETCONTRAST);
+      display.ssd1306_command(cfgContraste);
+    } else {
+      const int tempos[] = {0, 30, 60, 120, 300};
+      int indice = 0;
+
+      for (int i = 0; i < 5; i++) {
+        if (tempos[i] == cfgTempoDescanso) indice = i;
+      }
+
+      indice = (indice + 1) % 5;
+      cfgTempoDescanso = tempos[indice];
+    }
+
+    somTique();
+    esperaSoltar();
+  }
+
+  if (clicou(bOk, false)) {
+    cfgTelaOpcao = 1 - cfgTelaOpcao;
+    somConfirma();
+    esperaSoltar();
+  }
+}
+
 // ---------------- SETUP / LOOP ----------------
 void setup() {
   Serial.begin(115200);
@@ -2276,6 +2556,10 @@ void setup() {
     Serial.println("OLED nao encontrado! Confira SDA/SCL.");
     while (true) delay(1000);
   }
+
+  carregarConfiguracoes();
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(cfgContraste);
 
   // hora: fuso + plano B + Wi-Fi em segundo plano
   setenv("TZ", FUSO, 1);
@@ -2307,10 +2591,18 @@ void loop() {
       controlarPetStatus();
       telaPetStatus();
       break;  
-      case TELA_PET_ACOES:
-        controlarPetAcoes();
-        telaPetAcoes();
-        break;
+    case TELA_PET_ACOES:
+      controlarPetAcoes();
+      telaPetAcoes();
+      break;
+    case TELA_CONFIGURACOES:
+      controlarConfiguracoes();
+      telaConfiguracoes();
+      break;
+    case TELA_CFG_TELA:
+      controlarConfigTela();
+      telaConfigTela();
+      break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
