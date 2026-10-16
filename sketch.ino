@@ -1,10 +1,12 @@
 // ============================================================
-//  CYBERDECK - Etapa 2: menu principal (carrossel de icones)
+//  CYBERDECK - Etapa 3: modulo Relogio / Data
 //  ESP32 + OLED SSD1306 128x64 (I2C)
 // ============================================================
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <time.h>
 
 // ---------------- PINAGEM ----------------
 #define PIN_SDA       21
@@ -19,13 +21,25 @@
 // ---------------- PERSONALIZE ----------------
 const char* NOME = "raiza";   // use so letras sem acento (a fonte do OLED nao tem)
 
+// Wi-Fi (usado pra pegar a hora certa na internet)
+// No Wokwi deixe assim. No ESP32 de verdade, coloque o nome e a senha da sua rede.
+const char* WIFI_SSID  = "Wokwi-GUEST";
+const char* WIFI_SENHA = "";
+
+// Fuso horario: Brasilia = UTC-3 (formato POSIX: o sinal e invertido de proposito)
+const char* FUSO = "<-03>3";
+
+// Hemisferio sul (Brasil): a Lua crescente aparece iluminada do lado ESQUERDO.
+// Mude pra false se quiser o desenho do hemisferio norte.
+#define HEMISFERIO_SUL true
+
 // ---------------- DISPLAY ----------------
 #define SCREEN_W 128
 #define SCREEN_H 64
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
-enum Tela { TELA_BOAS_VINDAS, TELA_MENU };
+enum Tela { TELA_BOAS_VINDAS, TELA_MENU, TELA_RELOGIO };
 Tela telaAtual = TELA_BOAS_VINDAS;
 
 // (precisa ficar aqui no topo: o Arduino gera os prototipos das funcoes
@@ -323,6 +337,357 @@ void desenhaPurinMini(int x, int y, int olhar, bool piscando) {
 }
 
 // ============================================================
+//  HORA + LUA  (usado pelo modulo Relogio)
+// ============================================================
+struct tm hora;                 // hora local atual (preenchida por atualizaHora)
+bool   horaSync   = false;      // true = hora veio da internet (NTP)
+time_t horaEpoch  = 0;
+time_t epochBase  = 0;          // hora da compilacao (plano B sem internet)
+bool   ntpIniciado = false;
+float  luaIdade   = 0;          // idade da Lua em dias (0 a 29.5)
+float  luaP       = 0;          // fase da Lua (0 = nova, 0.5 = cheia, 1 = nova)
+
+const char* DIAS_SEMANA[7] = { "DOMINGO", "SEGUNDA", "TERCA", "QUARTA", "QUINTA", "SEXTA", "SABADO" };
+const char* MESES_CURTO[12] = { "JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ" };
+const char* FASES[8] = {
+  "Lua Nova", "Crescente", "Quarto Crescente", "Gibosa Crescente",
+  "Lua Cheia", "Gibosa Minguante", "Quarto Minguante", "Minguante"
+};
+
+// Plano B: se nao tiver internet, comeca da hora em que o codigo foi compilado
+void iniciaHoraCompilacao() {
+  char mes[4];
+  int d, a, h, m, s;
+  sscanf(__DATE__, "%3s %d %d", mes, &d, &a);
+  sscanf(__TIME__, "%d:%d:%d", &h, &m, &s);
+  const char* meses = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  const char* achou = strstr(meses, mes);
+  int mi = achou ? (achou - meses) / 3 : 0;
+
+  struct tm c = {};
+  c.tm_year = a - 1900;
+  c.tm_mon  = mi;
+  c.tm_mday = d;
+  c.tm_hour = h;
+  c.tm_min  = m;
+  c.tm_sec  = s;
+  c.tm_isdst = 0;
+  epochBase = mktime(&c);
+}
+
+// Liga o Wi-Fi sem travar (a conexao acontece em segundo plano)
+void wifiIniciar() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_SENHA, 6);
+}
+
+// Chame a cada volta do loop: quando o Wi-Fi conectar, inicia o NTP
+void wifiAtualiza() {
+  if (!ntpIniciado && WiFi.status() == WL_CONNECTED) {
+    configTzTime(FUSO, "pool.ntp.org", "time.nist.gov");
+    ntpIniciado = true;
+  }
+}
+
+void atualizaHora() {
+  time_t agora = time(nullptr);
+  if (agora > 1700000000) {            // passou de 2023 = o NTP ja acertou o relogio
+    horaSync = true;
+  } else {
+    horaSync = false;
+    agora = epochBase + (time_t)(millis() / 1000);
+  }
+  horaEpoch = agora;
+  localtime_r(&agora, &hora);
+
+  // Fase da Lua: lua nova de referencia = 6/jan/2000 18:14 UTC (epoch 947182440)
+  const double CICLO = 29.530588853;
+  double dias = (double)(agora - 947182440) / 86400.0;
+  double a = fmod(dias, CICLO);
+  if (a < 0) a += CICLO;
+  luaIdade = (float)a;
+  luaP = (float)(a / CICLO);
+}
+
+int diasNoMes(int mes0, int ano) {
+  static const uint8_t d[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+  bool bissexto = (ano % 4 == 0 && ano % 100 != 0) || (ano % 400 == 0);
+  if (mes0 == 1 && bissexto) return 29;
+  return d[mes0];
+}
+
+// Desenha a Lua com a parte iluminada de acordo com a fase p (0..1)
+void desenhaLua(int cx, int cy, int r, float p) {
+  float k = cosf(2.0f * PI * p);
+  bool crescendo = (p < 0.5f);
+  for (int y = -r; y <= r; y++) {
+    float w = sqrtf((float)(r * r - y * y));
+    int wi = (int)roundf(w);
+    int xt = (int)roundf(w * k);      // posicao do terminador (borda luz/sombra)
+    int xa, xb;
+    if (crescendo) { xa = xt;  xb = wi;  }
+    else           { xa = -wi; xb = -xt; }
+    if (HEMISFERIO_SUL) { int ta = xa; xa = -xb; xb = -ta; }
+    if (xb > xa) display.drawFastHLine(cx + xa, cy + y, xb - xa + 1, WHITE);
+  }
+  display.drawCircle(cx, cy, r, WHITE);
+}
+
+// ============================================================
+//  MODULO RELOGIO
+// ============================================================
+#define N_PAGS_RELOGIO 4          // 0 digital | 1 analogico | 2 lua | 3 calendario
+#define DUR_WIPE 200              // ms da animacao de troca de pagina
+
+int pagRelogio = 0;
+unsigned long tPag = 0;
+
+void desenhaPontos(int x, int y) {
+  for (int i = 0; i < N_PAGS_RELOGIO; i++) {
+    if (i == pagRelogio) display.fillRect(x + i * 6, y, 3, 3, WHITE);
+    else                 display.drawPixel(x + i * 6 + 1, y + 1, WHITE);
+  }
+}
+
+// icone de sinal: cheio = hora da internet | piscando = ainda sincronizando
+void desenhaWifi(int x, int y) {
+  if (horaSync) {
+    display.fillRect(x,     y + 4, 2, 2, WHITE);
+    display.fillRect(x + 3, y + 2, 2, 4, WHITE);
+    display.fillRect(x + 6, y,     2, 6, WHITE);
+  } else if ((millis() / 500) % 2 == 0) {
+    display.drawRect(x,     y + 4, 2, 2, WHITE);
+    display.drawRect(x + 3, y + 2, 2, 4, WHITE);
+    display.drawRect(x + 6, y,     2, 6, WHITE);
+  }
+}
+
+static void ponteiro(int cx, int cy, float graus, int len, bool grosso) {
+  float rad = graus * DEG_TO_RAD;
+  int x = cx + (int)roundf(sinf(rad) * len);
+  int y = cy - (int)roundf(cosf(rad) * len);
+  display.drawLine(cx, cy, x, y, WHITE);
+  if (grosso) {
+    display.drawLine(cx + 1, cy, x + 1, y, WHITE);
+    display.drawLine(cx, cy + 1, x, y + 1, WHITE);
+  }
+}
+
+// ---------- pagina 0: digital ----------
+void paginaDigital() {
+  char buf[24];
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(DIAS_SEMANA[hora.tm_wday]);
+  desenhaPontos(50, 2);
+  desenhaWifi(117, 0);
+
+  // hora grandona (os dois pontos piscam)
+  snprintf(buf, sizeof(buf), "%02d%c%02d", hora.tm_hour, (hora.tm_sec % 2 == 0) ? ':' : ' ', hora.tm_min);
+  display.setTextSize(4);
+  display.setCursor(4, 11);
+  display.print(buf);
+
+  // barrinha dos segundos
+  display.setTextSize(1);
+  int larg = (hora.tm_sec * 120) / 59;
+  display.fillRect(4, 42, max(larg, 1), 2, WHITE);
+  for (int i = 0; i <= 5; i++) display.drawFastVLine(4 + i * 24, 44, 2, WHITE);
+
+  // data + segundos + luazinha
+  snprintf(buf, sizeof(buf), "%02d %s %d", hora.tm_mday, MESES_CURTO[hora.tm_mon], hora.tm_year + 1900);
+  display.setCursor(0, 52);
+  display.print(buf);
+  snprintf(buf, sizeof(buf), "%02ds", hora.tm_sec);
+  display.setCursor(76, 52);
+  display.print(buf);
+  desenhaLua(121, 57, 5, luaP);
+}
+
+// ---------- pagina 1: analogico ----------
+void paginaAnalogico() {
+  const int cx = 32, cy = 32;
+  char buf[24];
+
+  // mostrador
+  display.drawCircle(cx, cy, 30, WHITE);
+  for (int i = 0; i < 12; i++) {
+    float rad = i * 30 * DEG_TO_RAD;
+    int r1 = (i % 3 == 0) ? 23 : 26;
+    int r2 = 29;
+    display.drawLine(cx + (int)roundf(sinf(rad) * r1), cy - (int)roundf(cosf(rad) * r1),
+                     cx + (int)roundf(sinf(rad) * r2), cy - (int)roundf(cosf(rad) * r2), WHITE);
+  }
+
+  // ponteiros
+  float angH = (hora.tm_hour % 12) * 30.0f + hora.tm_min * 0.5f;
+  float angM = hora.tm_min * 6.0f + hora.tm_sec * 0.1f;
+  float angS = hora.tm_sec * 6.0f;
+  ponteiro(cx, cy, angH, 14, true);
+  ponteiro(cx, cy, angM, 22, true);
+  ponteiro(cx, cy, angS + 180, 5, false);   // rabinho do ponteiro dos segundos
+  ponteiro(cx, cy, angS, 25, false);
+  display.fillCircle(cx, cy, 2, WHITE);
+  display.drawPixel(cx, cy, BLACK);
+
+  // painel da direita
+  display.setTextSize(1);
+  desenhaPontos(70, 1);
+  desenhaWifi(117, 0);
+
+  snprintf(buf, sizeof(buf), "%02d:%02d", hora.tm_hour, hora.tm_min);
+  display.setTextSize(2);
+  display.setCursor(68, 9);
+  display.print(buf);
+
+  display.setTextSize(1);
+  display.setCursor(68, 29);
+  display.print(DIAS_SEMANA[hora.tm_wday]);
+  snprintf(buf, sizeof(buf), "%02d %s", hora.tm_mday, MESES_CURTO[hora.tm_mon]);
+  display.setCursor(68, 39);
+  display.print(buf);
+  snprintf(buf, sizeof(buf), "%d", hora.tm_year + 1900);
+  display.setCursor(68, 49);
+  display.print(buf);
+
+  desenhaLua(117, 51, 8, luaP);
+}
+
+// ---------- pagina 2: fases da lua ----------
+void paginaLua() {
+  char buf[24];
+  display.setTextSize(1);
+  display.setCursor(56, 2);
+  display.print("LUA");
+  desenhaPontos(100, 3);
+
+  desenhaLua(26, 30, 22, luaP);
+
+  const float CICLO = 29.530588853f;
+  int ilum = (int)roundf((1.0f - cosf(2.0f * PI * luaP)) * 50.0f);
+  float paraCheia = (luaP < 0.5f) ? (0.5f - luaP) * CICLO : (1.5f - luaP) * CICLO;
+  float paraNova  = (1.0f - luaP) * CICLO;
+  int dCheia = (int)roundf(paraCheia);
+  int dNova  = (int)roundf(paraNova);
+
+  snprintf(buf, sizeof(buf), "ilum. %d%%", ilum);
+  display.setCursor(56, 14);
+  display.print(buf);
+
+  snprintf(buf, sizeof(buf), "idade %dd", (int)roundf(luaIdade));
+  display.setCursor(56, 24);
+  display.print(buf);
+
+  if (dCheia == 0) snprintf(buf, sizeof(buf), "cheia hoje!");
+  else             snprintf(buf, sizeof(buf), "cheia em %dd", dCheia);
+  display.setCursor(56, 34);
+  display.print(buf);
+
+  if (dNova == 0 || dNova >= 30) snprintf(buf, sizeof(buf), "nova hoje!");
+  else                           snprintf(buf, sizeof(buf), "nova em %dd", dNova);
+  display.setCursor(56, 44);
+  display.print(buf);
+
+  // nome da fase centralizado embaixo
+  int idx = (int)(luaP * 8.0f + 0.5f) % 8;
+  int w = strlen(FASES[idx]) * 6;
+  display.setCursor((SCREEN_W - w) / 2, 56);
+  display.print(FASES[idx]);
+}
+
+// ---------- pagina 3: calendario do mes ----------
+void paginaCalendario() {
+  const int CAL_X0 = 36;
+  char buf[16];
+  display.setTextSize(1);
+
+  // coluna da esquerda: mes, ano, luazinha
+  display.setCursor(3, 2);
+  display.print(MESES_CURTO[hora.tm_mon]);
+  snprintf(buf, sizeof(buf), "%d", hora.tm_year + 1900);
+  display.setCursor(3, 12);
+  display.print(buf);
+  desenhaLua(16, 34, 9, luaP);
+  int ilum = (int)roundf((1.0f - cosf(2.0f * PI * luaP)) * 50.0f);
+  snprintf(buf, sizeof(buf), "%d%%", ilum);
+  display.setCursor((33 - (int)strlen(buf) * 6) / 2, 47);
+  display.print(buf);
+  desenhaPontos(4, 60);
+  display.drawFastVLine(33, 0, 64, WHITE);
+
+  // cabecalho dos dias da semana
+  const char* ini = "DSTQQSS";
+  for (int i = 0; i < 7; i++) {
+    display.setCursor(CAL_X0 + i * 13 + 3, 1);
+    display.print(ini[i]);
+  }
+  display.drawFastHLine(CAL_X0, 9, 91, WHITE);
+
+  // dias do mes (o de hoje fica destacado)
+  int primeiro = ((hora.tm_wday - ((hora.tm_mday - 1) % 7)) + 7) % 7;
+  int nd = diasNoMes(hora.tm_mon, hora.tm_year + 1900);
+  for (int dia = 1; dia <= nd; dia++) {
+    int pos = primeiro + dia - 1;
+    int x = CAL_X0 + (pos % 7) * 13;
+    int y = 11 + (pos / 7) * 9;
+    snprintf(buf, sizeof(buf), "%2d", dia);
+    if (dia == hora.tm_mday) {
+      display.fillRect(x - 1, y - 1, 13, 9, WHITE);
+      display.setTextColor(BLACK);
+      display.setCursor(x, y);
+      display.print(buf);
+      display.setTextColor(WHITE);
+    } else {
+      display.setCursor(x, y);
+      display.print(buf);
+    }
+  }
+}
+
+void irParaPagina(int dir) {
+  pagRelogio = (pagRelogio + dir + N_PAGS_RELOGIO) % N_PAGS_RELOGIO;
+  tPag = millis();
+  somTique();
+}
+
+// Declaracao antecipada (a tela do menu e definida mais abaixo)
+extern Botao bUp, bDown, bOk, bBack;
+
+void telaRelogio() {
+  // ---- entrada ----
+  if (clicou(bUp,   false)) irParaPagina(-1);
+  if (clicou(bDown, false)) irParaPagina(+1);
+  if (clicou(bOk,   false)) irParaPagina(+1);      // OK tambem alterna as telas
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
+
+  atualizaHora();
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  switch (pagRelogio) {
+    case 0: paginaDigital();    break;
+    case 1: paginaAnalogico();  break;
+    case 2: paginaLua();        break;
+    case 3: paginaCalendario(); break;
+  }
+
+  // animacao de troca de pagina: "cortina" que revela da esquerda pra direita
+  unsigned long dt = millis() - tPag;
+  if (dt < DUR_WIPE) {
+    int rx = (int)(SCREEN_W * dt / DUR_WIPE);
+    display.fillRect(rx, 0, SCREEN_W - rx, SCREEN_H, BLACK);
+    display.drawFastVLine(rx, 0, SCREEN_H, WHITE);
+  }
+
+  display.display();
+}
+
+// ============================================================
 //  MENU
 // ============================================================
 #define DUR_TRANSICAO 220      // ms da animacao de deslize
@@ -391,7 +756,13 @@ void telaMenu() {
   if (clicou(bDown, true)) navegar(+1);
   if (clicou(bOk,   false)) {
     somConfirma();
-    avisoAte = millis() + 1200;     // modulos ainda nao existem
+    if (selecionado == 0) {            // RELOGIO / DATA
+      esperaSoltar();
+      tPag = millis();
+      telaAtual = TELA_RELOGIO;
+      return;
+    }
+    avisoAte = millis() + 1200;        // os outros modulos ainda nao existem
   }
   if (clicou(bBack, false)) {
     somVoltar();
@@ -502,13 +873,21 @@ void setup() {
     while (true) delay(1000);
   }
 
+  // hora: fuso + plano B + Wi-Fi em segundo plano
+  setenv("TZ", FUSO, 1);
+  tzset();
+  iniciaHoraCompilacao();
+  wifiIniciar();
+
   sequenciaBoot();
 }
 
 void loop() {
+  wifiAtualiza();
   switch (telaAtual) {
     case TELA_BOAS_VINDAS: telaBoasVindas(); break;
     case TELA_MENU:        telaMenu();       break;
+    case TELA_RELOGIO:     telaRelogio();    break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
