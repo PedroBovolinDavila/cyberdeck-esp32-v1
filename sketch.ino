@@ -43,7 +43,10 @@ enum Tela {
   TELA_BOAS_VINDAS,
   TELA_MENU,
   TELA_RELOGIO,
-  TELA_TAROT
+  TELA_TAROT,
+  TELA_PET_QUARTO,
+  TELA_PET_STATUS,
+  TELA_PET_ACOES
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -137,6 +140,12 @@ void reiniciarTarot() {
   totalCartasUsadas = 0;
 }
 
+int petAcaoSelecionada = 0;
+
+unsigned long petAcaoAte = 0;
+const char* petAcaoMensagem = "";
+
+bool petAcaoAnimando = false;
 
 
 // ---------------- ESTRELAS ----------------
@@ -1328,6 +1337,16 @@ void textoCentralizado(const char* txt, int y) {
   display.print(txt);
 }
 
+bool petGirando = false;
+unsigned long tPetGiro = 0;
+unsigned long tPetQuarto = 0;
+int petFome = 75;
+int petEnergia = 85;
+int petFelicidade = 90;
+
+unsigned long petUltimaAtualizacao = 0;
+int petTicks = 0;
+
 void telaMenu() {
   unsigned long t = millis();
 
@@ -1351,6 +1370,13 @@ void telaMenu() {
 
       esperaSoltar();
       telaAtual = TELA_TAROT;
+      return;
+    }
+    if (selecionado == 4) {
+      esperaSoltar();
+      petGirando = false;
+      tPetQuarto = millis();
+      telaAtual = TELA_PET_QUARTO;
       return;
     }
     avisoAte = millis() + 1200;        // os outros modulos ainda nao existem
@@ -1409,6 +1435,475 @@ void telaMenu() {
 
   display.display();
 }
+
+
+ // ============================================================
+ // PET VIRTUAL — QUARTO DO POMPOMPURIN
+ // ============================================================
+
+void atualizaPet() {
+  unsigned long agora = millis();
+
+  if (petUltimaAtualizacao == 0) {
+    petUltimaAtualizacao = agora;
+    return;
+  }
+
+  if (agora - petUltimaAtualizacao >= 60000UL) {
+    petUltimaAtualizacao = agora;
+    petTicks++;
+
+    // A fome diminui a cada minuto
+    if (petFome > 0) petFome--;
+
+    // Energia diminui a cada dois minutos
+    if (petTicks % 2 == 0 && petEnergia > 0) {
+      petEnergia--;
+    }
+
+    // Felicidade diminui a cada três minutos
+    if (petTicks % 3 == 0 && petFelicidade > 0) {
+      petFelicidade--;
+    }
+  }
+}
+
+
+
+void desenhaQuarto() {
+  // Janela magica
+  display.drawRoundRect(5, 5, 27, 23, 3, WHITE);
+  display.drawFastVLine(18, 7, 19, WHITE);
+  display.drawFastHLine(7, 16, 23, WHITE);
+
+  // Lua na janela
+  display.drawCircle(11, 11, 3, WHITE);
+  display.drawPixel(24, 10, WHITE);
+  display.drawPixel(26, 22, WHITE);
+
+  // Prateleira
+  display.drawFastHLine(4, 31, 28, WHITE);
+  display.drawFastVLine(7, 31, 4, WHITE);
+  display.drawFastVLine(29, 31, 4, WHITE);
+
+  // Quadrinho na parede
+  display.drawRoundRect(99, 5, 23, 19, 2, WHITE);
+  display.drawPixel(110, 10, WHITE);
+  display.drawLine(104, 18, 110, 12, WHITE);
+  display.drawLine(110, 12, 117, 19, WHITE);
+
+  // Chao
+  display.drawFastHLine(0, 58, 128, WHITE);
+
+  // Caminha fofinha no canto inferior direito
+  display.drawRoundRect(83, 43, 40, 15, 3, WHITE);
+  display.drawFastHLine(86, 47, 34, WHITE);
+  display.drawRoundRect(87, 44, 11, 6, 2, WHITE);
+
+  // Pezinhos da cama
+  display.drawFastVLine(88, 58, 3, WHITE);
+  display.drawFastVLine(118, 58, 3, WHITE);
+
+  // Estrelinhas decorativas
+  display.drawPixel(40, 12, WHITE);
+  display.drawFastHLine(37, 19, 3, WHITE);
+  display.drawFastVLine(39, 17, 5, WHITE);
+
+  display.drawPixel(91, 29, WHITE);
+  display.drawFastHLine(88, 30, 5, WHITE);
+  display.drawFastVLine(90, 28, 5, WHITE);
+
+  // Vaso de plantinha
+  display.drawLine(9, 51, 9, 43, WHITE);
+  display.drawLine(9, 47, 5, 44, WHITE);
+  display.drawLine(9, 46, 13, 42, WHITE);
+  display.drawLine(5, 52, 13, 52, WHITE);
+  display.drawLine(6, 53, 12, 53, WHITE);
+}
+
+void desenhaPurinQuarto(int cx, int cy, bool piscando,
+                        bool bocaAberta, bool deCostas,
+                        int respiracao) {
+  int y = cy + respiracao;
+
+  // Silhueta traseira durante a rodadinha
+  if (deCostas) {
+    display.fillRoundRect(cx - 15, y - 13, 30, 23, 9, BLACK);
+    display.drawRoundRect(cx - 15, y - 13, 30, 23, 9, WHITE);
+
+    // Orelhinhas
+    display.fillRoundRect(cx - 20, y - 9, 7, 13, 3, BLACK);
+    display.drawRoundRect(cx - 20, y - 9, 7, 13, 3, WHITE);
+    display.fillRoundRect(cx + 13, y - 9, 7, 13, 3, BLACK);
+    display.drawRoundRect(cx + 13, y - 9, 7, 13, 3, WHITE);
+
+    // Boina
+    display.fillRoundRect(cx - 10, y - 17, 20, 6, 3, WHITE);
+    display.fillRect(cx - 1, y - 19, 3, 2, WHITE);
+
+    // Asterisco caracteristico
+    display.drawFastHLine(cx - 3, y + 1, 7, WHITE);
+    display.drawFastVLine(cx, y - 2, 7, WHITE);
+    display.drawLine(cx - 3, y - 2, cx + 3, y + 4, WHITE);
+    display.drawLine(cx - 3, y + 4, cx + 3, y - 2, WHITE);
+    return;
+  }
+
+  // Patinhas
+  display.fillRoundRect(cx - 10, y + 7, 8, 4, 2, WHITE);
+  display.fillRoundRect(cx + 2, y + 7, 8, 4, 2, WHITE);
+
+  // Orelhas caidinhas
+  display.fillRoundRect(cx - 20, y - 8, 7, 15, 3, BLACK);
+  display.drawRoundRect(cx - 20, y - 8, 7, 15, 3, WHITE);
+  display.fillRoundRect(cx + 13, y - 8, 7, 15, 3, BLACK);
+  display.drawRoundRect(cx + 13, y - 8, 7, 15, 3, WHITE);
+
+  // Cabeca
+  display.fillRoundRect(cx - 16, y - 18, 32, 27, 10, BLACK);
+  display.drawRoundRect(cx - 16, y - 18, 32, 27, 10, WHITE);
+
+  // Boina marrom representada em pixels brancos
+  display.fillRoundRect(cx - 11, y - 23, 22, 6, 3, WHITE);
+  display.fillRect(cx - 1, y - 25, 3, 2, WHITE);
+
+  // Olhos: piscada ou olhos abertos
+  if (piscando) {
+    display.drawFastHLine(cx - 8, y - 7, 4, WHITE);
+    display.drawFastHLine(cx + 5, y - 7, 4, WHITE);
+  } else {
+    display.fillCircle(cx - 6, y - 7, 1, WHITE);
+    display.fillCircle(cx + 6, y - 7, 1, WHITE);
+  }
+
+  // Focinho
+  display.drawRoundRect(cx - 5, y - 4, 10, 6, 2, WHITE);
+  display.drawPixel(cx, y - 3, WHITE);
+
+  // Boquinha muda entre fechada e aberta
+  if (bocaAberta) {
+    display.drawRoundRect(cx - 2, y + 1, 5, 4, 2, WHITE);
+    display.drawPixel(cx, y + 2, WHITE);
+  } else {
+    display.drawFastHLine(cx - 2, y + 2, 5, WHITE);
+  }
+
+  // Bochechinhas
+  display.drawFastHLine(cx - 12, y - 1, 3, WHITE);
+  display.drawFastHLine(cx + 10, y - 1, 3, WHITE);
+}
+
+void telaPetQuarto() {
+  unsigned long agora = millis();
+  unsigned long dt = agora - tPetGiro;
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  desenhaQuarto();
+
+  // Estrelas cintilantes
+  if ((agora / 350) % 2 == 0) {
+    display.drawPixel(47, 24, WHITE);
+    display.drawFastHLine(44, 25, 7, WHITE);
+    display.drawFastVLine(47, 22, 7, WHITE);
+  }
+
+  if ((agora / 500) % 2 == 0) {
+    display.drawPixel(76, 14, WHITE);
+    display.drawFastHLine(74, 15, 5, WHITE);
+    display.drawFastVLine(76, 13, 5, WHITE);
+  }
+
+  // Respiracao suave
+  int respiracao = ((agora % 1800) < 900) ? 0 : -1;
+
+  // Animacao da rodadinha
+  bool deCostas = false;
+  int cx = 62;
+
+  if (petGirando) {
+    if (dt >= 1000) {
+      petGirando = false;
+    } else {
+      int fase = dt / 200;
+
+      // Pequeno deslocamento lateral para dar sensacao de giro
+      if (fase == 1 || fase == 3) cx = 68;
+      if (fase == 2) deCostas = true;
+    }
+  }
+
+  bool piscando = ((agora % 3000) < 150);
+  bool bocaAberta = ((agora % 2300) > 1650 &&
+                     (agora % 2300) < 1900);
+
+  desenhaPurinQuarto(cx, 43, piscando, bocaAberta,
+                     deCostas, respiracao);
+
+  // Indicacao discreta de navegacao
+  display.setTextSize(1);
+  display.setCursor(39, 59);
+
+  display.display();
+}
+
+
+void telaPetStatus() {
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  // Titulo
+  display.setCursor(35, 0);
+  display.print("MEU PURIN");
+
+  display.drawFastHLine(0, 9, 128, WHITE);
+
+  // Desenho do Purin: a expressao muda conforme os atributos
+  bool cansado = petEnergia < 25;
+  bool faminto = petFome < 25;
+  bool piscando = cansado || ((millis() % 3000) < 150);
+  bool bocaAberta = faminto ||
+                    (petFelicidade >= 75 &&
+                     (millis() % 2000) < 250);
+
+  desenhaPurinQuarto(
+    20, 44,
+    piscando,
+    bocaAberta,
+    false,
+    0
+  );
+
+  // FOME
+  display.setCursor(43, 12);
+  display.print("FOME ");
+  display.print(petFome);
+
+  display.drawRect(43, 21, 81, 6, WHITE);
+  if (petFome > 0) {
+    display.fillRect(
+      45, 23,
+      (petFome * 77) / 100, 2,
+      WHITE
+    );
+  }
+
+  // ENERGIA
+  display.setCursor(43, 30);
+  display.print("ENERGIA ");
+  display.print(petEnergia);
+
+  display.drawRect(43, 39, 81, 6, WHITE);
+  if (petEnergia > 0) {
+    display.fillRect(
+      45, 41,
+      (petEnergia * 77) / 100, 2,
+      WHITE
+    );
+  }
+
+  // FELICIDADE
+  display.setCursor(43, 48);
+  display.print("ALEGRIA ");
+  display.print(petFelicidade);
+
+  display.drawRect(43, 57, 81, 6, WHITE);
+  if (petFelicidade > 0) {
+    display.fillRect(
+      45, 59,
+      (petFelicidade * 77) / 100, 2,
+      WHITE
+    );
+  }
+
+  display.display();
+}
+
+
+void controlarPetStatus() {
+  if (clicou(bBack, false) || clicou(bDown, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_PET_QUARTO;
+    return;
+  }
+
+  if (clicou(bOk, false)) {
+    somConfirma();
+    esperaSoltar();
+    petAcaoSelecionada = 0;
+    telaAtual = TELA_PET_ACOES;
+    return;
+  }
+}
+
+
+void controlarPetAcoes() {
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_PET_STATUS;
+    return;
+  }
+
+  if (clicou(bUp, false)) {
+    petAcaoSelecionada--;
+    if (petAcaoSelecionada < 0) petAcaoSelecionada = 3;
+    somConfirma();
+    esperaSoltar();
+    return;
+  }
+
+  if (clicou(bDown, false)) {
+    petAcaoSelecionada++;
+    if (petAcaoSelecionada > 3) petAcaoSelecionada = 0;
+    somConfirma();
+    esperaSoltar();
+    return;
+  }
+
+  if (clicou(bOk, false)) {
+    esperaSoltar();
+
+    switch (petAcaoSelecionada) {
+      case 0:
+        // Alimentar
+        petFome += 35;
+        if (petFome > 100) petFome = 100;
+
+        petAcaoMensagem = "NHAM!!";
+        break;
+
+      case 1:
+        // Brincar
+        petFelicidade += 20;
+        if (petFelicidade > 100) petFelicidade = 100;
+
+        petEnergia -= 15;
+        if (petEnergia < 0) petEnergia = 0;
+
+        petFome -= 8;
+        if (petFome < 0) petFome = 0;
+
+        petAcaoMensagem = "UHUU VAMOS!";
+        break;
+
+      case 2:
+        // Carinho
+        petFelicidade += 15;
+        if (petFelicidade > 100) petFelicidade = 100;
+
+        petAcaoMensagem = "AU AU! <3";
+        break;
+
+      case 3:
+        // Dormir
+        petEnergia += 35;
+        if (petEnergia > 100) petEnergia = 100;
+
+        petFome -= 5;
+        if (petFome < 0) petFome = 0;
+
+        petAcaoMensagem = "ZZZ...";
+        break;
+    }
+
+    petAcaoAte = millis() + 1800;
+    petAcaoAnimando = true;
+    somConfirma();
+  }
+}
+
+void telaPetAcoes() {
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(25, 0);
+  display.print("CUIDAR DO PURIN");
+  display.drawFastHLine(0, 9, 128, WHITE);
+
+  const char* nomes[] = {
+    "Alimentar",
+    "Brincar",
+    "Carinho",
+    "Dormir"
+  };
+
+  if (petAcaoAnimando && millis() < petAcaoAte) {
+    // Tela temporaria de reacao
+    bool pisca = ((millis() / 150) % 2 == 0);
+
+    desenhaPurinQuarto(
+      35, 39,
+      pisca,
+      true,
+      false,
+      0
+    );
+
+    display.setCursor(62, 25);
+    display.print(petAcaoMensagem);
+
+    display.setCursor(62, 39);
+    display.print("FOME ");
+    display.print(petFome);
+
+    display.setCursor(62, 49);
+    display.print("ENERG ");
+    display.print(petEnergia);
+
+  } else {
+    petAcaoAnimando = false;
+
+    for (int i = 0; i < 4; i++) {
+      int y = 14 + i * 11;
+
+      if (i == petAcaoSelecionada) {
+        display.fillRoundRect(5, y - 1, 118, 10, 2, WHITE);
+        display.setTextColor(BLACK);
+        display.setCursor(10, y);
+        display.print(">");
+        display.setCursor(23, y);
+        display.print(nomes[i]);
+        display.setTextColor(WHITE);
+      } else {
+        display.setCursor(23, y);
+        display.print(nomes[i]);
+      }
+    }
+  }
+
+  display.display();
+}
+
+
+
+void controlarPetQuarto() {
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
+
+  // UP abre o painel de status
+  if (clicou(bUp, false)) {
+    somConfirma();
+    esperaSoltar();
+    telaAtual = TELA_PET_STATUS;
+    return;
+  }
+
+  if (clicou(bOk, false) && !petGirando) {
+    petGirando = true;
+    tPetGiro = millis();
+    somConfirma();
+  }
+}
+
+
 
 // ---------------- TELAS ----------------
 void telaBoasVindas() {
@@ -1476,6 +1971,7 @@ void setup() {
 
 void loop() {
   wifiAtualiza();
+  atualizaPet();
   switch (telaAtual) {
     case TELA_BOAS_VINDAS: telaBoasVindas(); break;
     case TELA_MENU:        telaMenu();       break;
@@ -1484,6 +1980,18 @@ void loop() {
       controlarTarot();
       telaTarot();
       break;
+    case TELA_PET_QUARTO:
+      controlarPetQuarto();
+      telaPetQuarto();
+      break;
+    case TELA_PET_STATUS:
+      controlarPetStatus();
+      telaPetStatus();
+      break;  
+      case TELA_PET_ACOES:
+        controlarPetAcoes();
+        telaPetAcoes();
+        break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
