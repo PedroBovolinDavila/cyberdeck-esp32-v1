@@ -39,12 +39,105 @@ const char* FUSO = "<-03>3";
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 
-enum Tela { TELA_BOAS_VINDAS, TELA_MENU, TELA_RELOGIO };
+enum Tela {
+  TELA_BOAS_VINDAS,
+  TELA_MENU,
+  TELA_RELOGIO,
+  TELA_TAROT
+};
+
 Tela telaAtual = TELA_BOAS_VINDAS;
 
 // (precisa ficar aqui no topo: o Arduino gera os prototipos das funcoes
 //  antes de qualquer funcao, e eles usam este tipo)
 struct Botao { uint8_t pino; bool anterior; unsigned long proxRepeticao; };
+
+// ---------------- MODULO TAROT ----------------
+#define N_CARTAS_TAROT 22
+
+struct CartaTarot {
+  const char* nome;
+  const char* significado;
+};
+
+const CartaTarot baralhoTarot[N_CARTAS_TAROT] = {
+  {"O LOUCO",       "Novos caminhos"},
+  {"O MAGO",        "Acao e habilidade"},
+  {"A SACERDOTISA", "Intuicao e misterio"},
+  {"A IMPERATRIZ",  "Criacao e abundancia"},
+  {"O IMPERADOR",   "Ordem e estabilidade"},
+  {"O HIEROFANTE",  "Tradicao e ensino"},
+  {"OS ENAMORADOS", "Escolhas e uniao"},
+  {"O CARRO",       "Foco e conquista"},
+  {"A JUSTICA",     "Equilibrio e verdade"},
+  {"O EREMITA",     "Reflexao e sabedoria"},
+  {"RODA DA FORTUNA","Mudancas e ciclos"},
+  {"A FORCA",       "Coragem e paciencia"},
+  {"O ENFORCADO",   "Nova perspectiva"},
+  {"A MORTE",       "Fim e renovacao"},
+  {"A TEMPERANCA",  "Harmonia e medida"},
+  {"O DIABO",       "Desejos e apegos"},
+  {"A TORRE",       "Ruptura e revelacao"},
+  {"A ESTRELA",     "Esperanca e inspiracao"},
+  {"A LUA",         "Sonhos e incerteza"},
+  {"O SOL",         "Alegria e clareza"},
+  {"O JULGAMENTO",  "Despertar e decisao"},
+  {"O MUNDO",       "Conclusao e plenitude"}
+};
+
+// Estado exclusivo do modulo Tarot
+int cartaAtual = -1;
+int cartasUsadas[N_CARTAS_TAROT];
+int totalCartasUsadas = 0;
+
+enum EstadoTarot {
+  TAROT_ENTRADA,
+  TAROT_EMBARALHANDO,
+  TAROT_REVELANDO,
+  TAROT_INFORMACAO,
+  TAROT_DECISAO
+};
+
+EstadoTarot estadoTarot = TAROT_ENTRADA;
+
+unsigned long tTarot = 0;
+int opcaoTarot = 0; // 0 = outra carta, 1 = encerrar
+
+
+ // Sorteia uma carta que ainda nao saiu nesta tiragem
+int sortearCartaTarot() {
+  if (totalCartasUsadas >= N_CARTAS_TAROT) {
+    return -1;
+  }
+
+  int indice;
+  bool repetida;
+
+  do {
+    indice = random(N_CARTAS_TAROT);
+    repetida = false;
+
+    for (int i = 0; i < totalCartasUsadas; i++) {
+      if (cartasUsadas[i] == indice) {
+        repetida = true;
+        break;
+      }
+    }
+  } while (repetida);
+
+  cartasUsadas[totalCartasUsadas] = indice;
+  totalCartasUsadas++;
+
+  return indice;
+}
+
+// Reinicia a tiragem e libera todas as cartas
+void reiniciarTarot() {
+  cartaAtual = -1;
+  totalCartasUsadas = 0;
+}
+
+
 
 // ---------------- ESTRELAS ----------------
 struct Estrela { uint8_t x, y, tipo; uint16_t periodo, defasagem; };
@@ -170,6 +263,13 @@ void somLigar() {
 
 void somTique()    { beep(2400, 8); }    // navegar no menu
 void somConfirma() { beep(1568, 60); }   // OK
+void somErro() {
+  tone(PIN_BUZZER, 220, 180);
+  delay(220);
+  tone(PIN_BUZZER, 160, 250);
+  delay(270);
+  noTone(PIN_BUZZER);
+}
 void somVoltar()   { beep(988, 60); }    // BACK
 
 // ---------------- BOOT (terminal) ----------------
@@ -231,10 +331,18 @@ static void ARC(int cx, int cy, int r, int a0, int a1) {
   }
 }
 
-#define N_ITENS 8
+#define N_ITENS 9
+
 const char* NOMES[N_ITENS] = {
-  "RELOGIO / DATA", "SCANNER WI-FI", "MONITOR SISTEMA", "MINI JOGOS",
-  "PET VIRTUAL", "CONFIGURACOES", "CRONOMETRO", "EFEITOS LED"
+  "RELOGIO / DATA",
+  "SCANNER WI-FI",
+  "MONITOR SISTEMA",
+  "MINI JOGOS",
+  "PET VIRTUAL",
+  "CONFIGURACOES",
+  "CRONOMETRO",
+  "EFEITOS LED",
+  "TAROT"
 };
 
 void desenhaIcone(int id, int cx, int cy, int sz) {
@@ -311,6 +419,28 @@ void desenhaIcone(int id, int cx, int cy, int sz) {
         int y = 16 + (int)roundf(sinf(rad) * 12);
         C(x, y, 2, k == aceso);
       }
+      break;
+    }
+    case 8: { // TAROT — carta mistica
+      // Contorno externo da carta
+      R(6, 2, 20, 28, 2, 0);
+
+      // Moldura interna
+      R(9, 5, 14, 22, 1, 0);
+
+      // Estrela central
+      L(16, 9, 18, 15);
+      L(18, 15, 23, 16);
+      L(23, 16, 18, 18);
+      L(18, 18, 16, 24);
+      L(16, 24, 14, 18);
+      L(14, 18, 9, 16);
+      L(9, 16, 14, 15);
+      L(14, 15, 16, 9);
+
+      // Simbolos decorativos
+      C(16, 7, 1, false);
+      L(13, 27, 19, 27);
       break;
     }
   }
@@ -687,6 +817,456 @@ void telaRelogio() {
   display.display();
 }
 
+
+
+void desenhaSimboloTarot(int cx, int cy, int carta, int s) {
+  // Simbolos simplificados para os 22 Arcanos Maiores
+  switch (carta) {
+    case 0: // O Louco: caminho
+      display.drawLine(cx - 7*s, cy + 7*s, cx, cy - 5*s, WHITE);
+      display.drawLine(cx, cy - 5*s, cx + 7*s, cy + 7*s, WHITE);
+      display.drawCircle(cx, cy - 8*s, 2*s, WHITE);
+      break;
+
+    case 1: // O Mago: bastao
+      display.drawLine(cx, cy + 9*s, cx, cy - 9*s, WHITE);
+      display.drawCircle(cx, cy - 10*s, 2*s, WHITE);
+      display.drawLine(cx - 7*s, cy + 8*s, cx + 7*s, cy + 8*s, WHITE);
+      break;
+
+    case 2: // Sacerdotisa: lua
+    case 18: // A Lua
+      display.drawCircle(cx, cy, 8*s, WHITE);
+      display.fillCircle(cx + 4*s, cy - 3*s, 7*s, BLACK);
+      display.drawCircle(cx, cy, 8*s, WHITE);
+      display.drawPixel(cx - 9*s, cy - 10*s, WHITE);
+      display.drawPixel(cx + 9*s, cy + 9*s, WHITE);
+      break;
+
+    case 3: // Imperatriz: flor
+      display.drawCircle(cx, cy, 3*s, WHITE);
+      display.drawCircle(cx, cy - 6*s, 3*s, WHITE);
+      display.drawCircle(cx + 6*s, cy, 3*s, WHITE);
+      display.drawCircle(cx, cy + 6*s, 3*s, WHITE);
+      display.drawCircle(cx - 6*s, cy, 3*s, WHITE);
+      display.drawLine(cx, cy + 9*s, cx, cy + 14*s, WHITE);
+      break;
+
+    case 4: // Imperador: coroa
+      display.drawLine(cx - 9*s, cy + 5*s, cx - 7*s, cy - 5*s, WHITE);
+      display.drawLine(cx - 7*s, cy - 5*s, cx, cy + 1*s, WHITE);
+      display.drawLine(cx, cy + 1*s, cx + 7*s, cy - 5*s, WHITE);
+      display.drawLine(cx + 7*s, cy - 5*s, cx + 9*s, cy + 5*s, WHITE);
+      display.drawLine(cx - 9*s, cy + 5*s, cx + 9*s, cy + 5*s, WHITE);
+      display.drawLine(cx - 7*s, cy + 9*s, cx + 7*s, cy + 9*s, WHITE);
+      break;
+
+    case 5: // Hierofante: templo
+      display.drawTriangle(cx, cy - 9*s, cx - 9*s, cy - 2*s,
+                           cx + 9*s, cy - 2*s, WHITE);
+      display.drawLine(cx - 9*s, cy + 9*s, cx + 9*s, cy + 9*s, WHITE);
+      for (int i = -1; i <= 1; i++)
+        display.drawLine(cx + i*6*s, cy, cx + i*6*s, cy + 8*s, WHITE);
+      break;
+
+    case 6: // Enamorados: uniao
+      display.drawCircle(cx - 5*s, cy - 2*s, 5*s, WHITE);
+      display.drawCircle(cx + 5*s, cy - 2*s, 5*s, WHITE);
+      display.drawLine(cx - 9*s, cy + 1*s, cx, cy + 10*s, WHITE);
+      display.drawLine(cx + 9*s, cy + 1*s, cx, cy + 10*s, WHITE);
+      break;
+
+    case 7: // Carro
+      display.drawRoundRect(cx - 9*s, cy - 5*s, 18*s, 13*s, 2*s, WHITE);
+      display.drawCircle(cx - 6*s, cy + 10*s, 3*s, WHITE);
+      display.drawCircle(cx + 6*s, cy + 10*s, 3*s, WHITE);
+      display.drawLine(cx, cy - 11*s, cx, cy - 5*s, WHITE);
+      break;
+
+    case 8: // Justica: balanca
+      display.drawLine(cx, cy - 10*s, cx, cy + 10*s, WHITE);
+      display.drawLine(cx - 9*s, cy - 5*s, cx + 9*s, cy - 5*s, WHITE);
+      display.drawLine(cx - 7*s, cy - 5*s, cx - 10*s, cy + 2*s, WHITE);
+      display.drawLine(cx - 10*s, cy + 2*s, cx - 4*s, cy + 2*s, WHITE);
+      display.drawLine(cx + 7*s, cy - 5*s, cx + 4*s, cy + 2*s, WHITE);
+      display.drawLine(cx + 4*s, cy + 2*s, cx + 10*s, cy + 2*s, WHITE);
+      display.drawLine(cx - 6*s, cy + 10*s, cx + 6*s, cy + 10*s, WHITE);
+      break;
+
+    case 9: // Eremita: lanterna
+      display.drawCircle(cx, cy - 2*s, 7*s, WHITE);
+      display.drawCircle(cx, cy - 2*s, 3*s, WHITE);
+      display.drawLine(cx, cy + 5*s, cx, cy + 11*s, WHITE);
+      display.drawLine(cx - 5*s, cy + 11*s, cx + 5*s, cy + 11*s, WHITE);
+      break;
+
+    case 10: // Roda da Fortuna
+      display.drawCircle(cx, cy, 10*s, WHITE);
+      display.drawCircle(cx, cy, 4*s, WHITE);
+      display.drawLine(cx, cy - 10*s, cx, cy + 10*s, WHITE);
+      display.drawLine(cx - 10*s, cy, cx + 10*s, cy, WHITE);
+      display.drawLine(cx - 7*s, cy - 7*s, cx + 7*s, cy + 7*s, WHITE);
+      display.drawLine(cx + 7*s, cy - 7*s, cx - 7*s, cy + 7*s, WHITE);
+      break;
+
+    case 11: // Forca: infinito
+      display.drawLine(cx - 9*s, cy, cx - 5*s, cy - 5*s, WHITE);
+      display.drawLine(cx - 5*s, cy - 5*s, cx, cy, WHITE);
+      display.drawLine(cx, cy, cx + 5*s, cy + 5*s, WHITE);
+      display.drawLine(cx + 5*s, cy + 5*s, cx + 9*s, cy, WHITE);
+      display.drawLine(cx + 9*s, cy, cx + 5*s, cy - 5*s, WHITE);
+      display.drawLine(cx + 5*s, cy - 5*s, cx, cy, WHITE);
+      display.drawLine(cx, cy, cx - 5*s, cy + 5*s, WHITE);
+      display.drawLine(cx - 5*s, cy + 5*s, cx - 9*s, cy, WHITE);
+      break;
+
+    case 12: // Enforcado
+      display.drawLine(cx - 8*s, cy - 8*s, cx + 8*s, cy - 8*s, WHITE);
+      display.drawLine(cx, cy - 8*s, cx, cy + 4*s, WHITE);
+      display.drawCircle(cx, cy + 7*s, 3*s, WHITE);
+      display.drawLine(cx - 7*s, cy + 2*s, cx + 7*s, cy + 2*s, WHITE);
+      break;
+
+    case 13: // Morte: foice
+      display.drawLine(cx - 5*s, cy + 10*s, cx + 6*s, cy - 9*s, WHITE);
+      display.drawCircle(cx + 3*s, cy - 6*s, 6*s, WHITE);
+      display.drawLine(cx + 3*s, cy - 12*s, cx + 9*s, cy - 6*s, WHITE);
+      break;
+
+    case 14: // Temperanca: dois vasos
+      display.drawRoundRect(cx - 10*s, cy - 7*s, 7*s, 12*s, 2*s, WHITE);
+      display.drawRoundRect(cx + 3*s, cy + 1*s, 7*s, 12*s, 2*s, WHITE);
+      display.drawLine(cx - 3*s, cy - 3*s, cx + 3*s, cy + 5*s, WHITE);
+      break;
+
+    case 15: // Diabo: chifres
+      display.drawCircle(cx, cy, 7*s, WHITE);
+      display.drawLine(cx - 5*s, cy - 5*s, cx - 10*s, cy - 11*s, WHITE);
+      display.drawLine(cx + 5*s, cy - 5*s, cx + 10*s, cy - 11*s, WHITE);
+      display.drawPixel(cx - 3*s, cy, WHITE);
+      display.drawPixel(cx + 3*s, cy, WHITE);
+      break;
+
+    case 16: // Torre: raio
+      display.drawLine(cx + 3*s, cy - 11*s, cx - 5*s, cy, WHITE);
+      display.drawLine(cx - 5*s, cy, cx + 2*s, cy, WHITE);
+      display.drawLine(cx + 2*s, cy, cx - 3*s, cy + 11*s, WHITE);
+      display.drawRoundRect(cx - 7*s, cy - 12*s, 14*s, 5*s, 1*s, WHITE);
+      break;
+
+    case 17: // Estrela
+      display.drawLine(cx, cy - 11*s, cx + 3*s, cy - 3*s, WHITE);
+      display.drawLine(cx + 3*s, cy - 3*s, cx + 11*s, cy, WHITE);
+      display.drawLine(cx + 11*s, cy, cx + 3*s, cy + 3*s, WHITE);
+      display.drawLine(cx + 3*s, cy + 3*s, cx, cy + 11*s, WHITE);
+      display.drawLine(cx, cy + 11*s, cx - 3*s, cy + 3*s, WHITE);
+      display.drawLine(cx - 3*s, cy + 3*s, cx - 11*s, cy, WHITE);
+      display.drawLine(cx - 11*s, cy, cx - 3*s, cy - 3*s, WHITE);
+      display.drawLine(cx - 3*s, cy - 3*s, cx, cy - 11*s, WHITE);
+      break;
+
+    case 19: // Sol
+      display.drawCircle(cx, cy, 6*s, WHITE);
+      for (int i = 0; i < 8; i++) {
+        float a = i * PI / 4.0f;
+        display.drawLine(cx + (int)(8*s*cosf(a)),
+                         cy + (int)(8*s*sinf(a)),
+                         cx + (int)(11*s*cosf(a)),
+                         cy + (int)(11*s*sinf(a)), WHITE);
+      }
+      break;
+
+    case 20: // Julgamento: trombeta
+      display.drawLine(cx - 9*s, cy - 5*s, cx + 3*s, cy + 1*s, WHITE);
+      display.drawLine(cx + 3*s, cy + 1*s, cx + 3*s, cy + 6*s, WHITE);
+      display.drawLine(cx + 3*s, cy + 6*s, cx - 9*s, cy + 1*s, WHITE);
+      display.drawLine(cx + 6*s, cy - 5*s, cx + 10*s, cy - 8*s, WHITE);
+      display.drawLine(cx + 7*s, cy, cx + 12*s, cy, WHITE);
+      break;
+
+    case 21: // Mundo: circulo
+      display.drawCircle(cx, cy, 10*s, WHITE);
+      display.drawCircle(cx, cy, 6*s, WHITE);
+      display.drawLine(cx - 4*s, cy, cx + 4*s, cy, WHITE);
+      display.drawLine(cx, cy - 4*s, cx, cy + 4*s, WHITE);
+      break;
+  }
+}
+
+void desenhaCartaTarot(int x, int y, int w, int h,
+                       int indice, bool verso) {
+  display.drawRoundRect(x, y, w, h, 3, WHITE);
+  display.drawRoundRect(x + 3, y + 3, w - 6, h - 6, 2, WHITE);
+
+  if (verso) {
+    int cx = x + w/2;
+    int cy = y + h/2;
+    display.drawCircle(cx, cy, min(w,h)/4, WHITE);
+    display.drawCircle(cx, cy, min(w,h)/4 - 3, WHITE);
+    display.drawLine(cx, cy - 10, cx + 3, cy - 3, WHITE);
+    display.drawLine(cx + 3, cy - 3, cx + 10, cy, WHITE);
+    display.drawLine(cx + 10, cy, cx + 3, cy + 3, WHITE);
+    display.drawLine(cx + 3, cy + 3, cx, cy + 10, WHITE);
+    display.drawLine(cx, cy + 10, cx - 3, cy + 3, WHITE);
+    display.drawLine(cx - 3, cy + 3, cx - 10, cy, WHITE);
+    display.drawLine(cx - 10, cy, cx - 3, cy - 3, WHITE);
+    display.drawLine(cx - 3, cy - 3, cx, cy - 10, WHITE);
+  } else if (indice >= 0 && indice < N_CARTAS_TAROT) {
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(x + 5, y + 5);
+    display.print(indice + 1);
+
+    int s = (w >= 42) ? 1 : 1;
+    desenhaSimboloTarot(x + w/2, y + h/2 + 2, indice, s);
+
+    display.drawFastHLine(x + 7, y + h - 7, w - 14, WHITE);
+  }
+}
+
+void prepararNovaCartaTarot() {
+  if (totalCartasUsadas >= N_CARTAS_TAROT) {
+    estadoTarot = TAROT_DECISAO;
+    opcaoTarot = 1;
+    return;
+  }
+
+  cartaAtual = -1;
+  estadoTarot = TAROT_EMBARALHANDO;
+  tTarot = millis();
+}
+
+void telaTarot() {
+  unsigned long agora = millis();
+  unsigned long dt = agora - tTarot;
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  if (estadoTarot == TAROT_ENTRADA) {
+    desenhaEstrelas();
+
+    // Lua e moldura ornamental
+    display.drawCircle(64, 18, 10, WHITE);
+    display.fillCircle(69, 14, 9, BLACK);
+    display.drawCircle(64, 18, 10, WHITE);
+    display.drawPixel(49, 12, WHITE);
+    display.drawPixel(78, 27, WHITE);
+    display.drawPixel(44, 27, WHITE);
+    display.drawPixel(83, 10, WHITE);
+
+    display.drawRoundRect(14, 32, 100, 25, 4, WHITE);
+    display.drawFastHLine(25, 35, 78, WHITE);
+
+    const char* titulo = "O ORACULO";
+    display.setCursor((128 - strlen(titulo)*6)/2, 39);
+    display.print(titulo);
+
+    if ((agora / 500) % 2 == 0) {
+      const char* convite = "OK PARA CONSULTAR";
+      display.setCursor((128 - strlen(convite)*6)/2, 49);
+      display.print(convite);
+    }
+
+    display.display();
+    return;
+  }
+
+  if (estadoTarot == TAROT_EMBARALHANDO) {
+    desenhaEstrelas();
+
+    display.setCursor(26, 2);
+    display.print("EMBARALHANDO");
+
+    int fase = (agora / 65) % 3;
+    int x1 = 9 + fase * 5;
+    int x2 = 47 - fase * 4;
+    int x3 = 84 + fase * 3;
+
+    desenhaCartaTarot(x1, 17 + (fase == 0 ? 4 : 0), 28, 39, -1, true);
+    desenhaCartaTarot(x2, 13 + (fase == 1 ? 5 : 0), 30, 42, -1, true);
+    desenhaCartaTarot(x3, 18 + (fase == 2 ? 3 : 0), 28, 39, -1, true);
+
+    if (dt >= 1750) {
+      cartaAtual = sortearCartaTarot();
+      estadoTarot = TAROT_REVELANDO;
+      tTarot = agora;
+      somConfirma();
+    }
+
+    display.display();
+    return;
+  }
+
+  if (estadoTarot == TAROT_REVELANDO) {
+    desenhaEstrelas();
+
+    // A carta cresce no centro, como se estivesse sendo revelada
+    int w = 22 + min((int)(dt / 18), 22);
+    int h = 32 + min((int)(dt / 15), 27);
+    int x = (128 - w) / 2;
+    int y = (64 - h) / 2;
+
+    if (dt < 250) {
+      desenhaCartaTarot(x, y, w, h, -1, true);
+    } else {
+      desenhaCartaTarot(x, y, w, h, cartaAtual, false);
+    }
+
+    if (dt >= 850) {
+      estadoTarot = TAROT_INFORMACAO;
+      tTarot = agora;
+    }
+
+    display.display();
+    return;
+  }
+
+  if (estadoTarot == TAROT_INFORMACAO) {
+    // Carta em miniatura à esquerda
+    desenhaCartaTarot(2, 7, 36, 50, cartaAtual, false);
+
+    // Nome e interpretacao à direita
+    display.setCursor(42, 8);
+    display.print(baralhoTarot[cartaAtual].nome);
+
+    display.drawFastHLine(42, 19, 83, WHITE);
+
+    display.setCursor(42, 24);
+    display.print("SIGNIFICADO");
+
+    const char* significado = baralhoTarot[cartaAtual].significado;
+    int tamanho = strlen(significado);
+    int corte = min(tamanho, 14);
+
+    if (tamanho > corte) {
+      while (corte > 0 && significado[corte] != ' ') corte--;
+      if (corte == 0) corte = min(tamanho, 14);
+    }
+
+    char linha1[16];
+    strncpy(linha1, significado, corte);
+    linha1[corte] = '\0';
+
+    display.setCursor(42, 36);
+    display.print(linha1);
+
+    if (significado[corte] == ' ') {
+      display.setCursor(42, 46);
+      display.print(significado + corte + 1);
+    }
+
+    display.setCursor(42, 57);
+    display.print("OK: continuar");
+
+    display.display();
+    return;
+  }
+
+  if (estadoTarot == TAROT_DECISAO) {
+    desenhaEstrelas();
+
+    display.setCursor(24, 5);
+    display.print("SUA CONSULTA");
+
+    display.drawRoundRect(8, 17, 112, 40, 4, WHITE);
+
+    if (totalCartasUsadas >= N_CARTAS_TAROT) {
+      display.setCursor(20, 25);
+      display.print("BARALHO ESGOTADO");
+      display.setCursor(22, 41);
+      display.print("OK: encerrar");
+    } else {
+      display.setCursor(22, 22);
+      display.print("TIRAR OUTRA?");
+
+      if (opcaoTarot == 0) {
+        display.fillRoundRect(17, 35, 44, 15, 3, WHITE);
+        display.setTextColor(BLACK);
+        display.setCursor(28, 39);
+        display.print("SIM");
+        display.setTextColor(WHITE);
+
+        display.drawRoundRect(68, 35, 43, 15, 3, WHITE);
+        display.setCursor(78, 39);
+        display.print("NAO");
+      } else {
+        display.drawRoundRect(17, 35, 44, 15, 3, WHITE);
+        display.setCursor(28, 39);
+        display.print("SIM");
+
+        display.fillRoundRect(68, 35, 43, 15, 3, WHITE);
+        display.setTextColor(BLACK);
+        display.setCursor(78, 39);
+        display.print("NAO");
+        display.setTextColor(WHITE);
+      }
+    }
+
+    display.display();
+  }
+}
+
+void controlarTarot() {
+  // BACK sempre encerra a consulta e retorna ao menu
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
+
+  if (estadoTarot == TAROT_ENTRADA) {
+    if (clicou(bOk, false)) {
+      esperaSoltar();
+      somConfirma();
+      prepararNovaCartaTarot();
+    }
+    return;
+  }
+
+  if (estadoTarot == TAROT_INFORMACAO) {
+    if (clicou(bOk, false)) {
+      esperaSoltar();
+      somConfirma();
+      estadoTarot = TAROT_DECISAO;
+      opcaoTarot = 0;
+    }
+    return;
+  }
+
+  if (estadoTarot == TAROT_DECISAO) {
+    if (totalCartasUsadas >= N_CARTAS_TAROT) {
+      if (clicou(bOk, false)) {
+        esperaSoltar();
+        somVoltar();
+        telaAtual = TELA_MENU;
+      }
+      return;
+    }
+
+    if (clicou(bUp, false) || clicou(bDown, false)) {
+      opcaoTarot = 1 - opcaoTarot;
+      somTique();
+    }
+
+    if (clicou(bOk, false)) {
+      esperaSoltar();
+      somConfirma();
+
+      if (opcaoTarot == 0) {
+        prepararNovaCartaTarot();
+      } else {
+        somVoltar();
+        telaAtual = TELA_MENU;
+      }
+    }
+  }
+}
+
+
+
 // ============================================================
 //  MENU
 // ============================================================
@@ -760,6 +1340,17 @@ void telaMenu() {
       esperaSoltar();
       tPag = millis();
       telaAtual = TELA_RELOGIO;
+      return;
+    }
+    if (selecionado == 8) {
+      reiniciarTarot();
+      cartaAtual = -1;
+      estadoTarot = TAROT_ENTRADA;
+      tTarot = millis();
+      opcaoTarot = 0;
+
+      esperaSoltar();
+      telaAtual = TELA_TAROT;
       return;
     }
     avisoAte = millis() + 1200;        // os outros modulos ainda nao existem
@@ -858,6 +1449,7 @@ void telaBoasVindas() {
 // ---------------- SETUP / LOOP ----------------
 void setup() {
   Serial.begin(115200);
+  randomSeed(micros());
 
   pinMode(PIN_BTN_UP,   INPUT_PULLUP);
   pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
@@ -888,6 +1480,10 @@ void loop() {
     case TELA_BOAS_VINDAS: telaBoasVindas(); break;
     case TELA_MENU:        telaMenu();       break;
     case TELA_RELOGIO:     telaRelogio();    break;
+    case TELA_TAROT:
+      controlarTarot();
+      telaTarot();
+      break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
