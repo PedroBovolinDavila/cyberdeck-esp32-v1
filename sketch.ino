@@ -141,11 +141,25 @@ void reiniciarTarot() {
 }
 
 int petAcaoSelecionada = 0;
-
 unsigned long petAcaoAte = 0;
 const char* petAcaoMensagem = "";
-
 bool petAcaoAnimando = false;
+int petTipoAnimacao = -1;
+int petHumor = 0;
+unsigned long petInicioAnimacao = 0;
+bool petGirando = false;
+unsigned long tPetGiro = 0;
+unsigned long tPetQuarto = 0;
+int petFome = 75;
+int petEnergia = 85;
+int petFelicidade = 90;
+unsigned long petUltimaAtualizacao = 0;
+int petTicks = 0;
+bool petDormindo = false;
+bool petAcordando = false;
+bool petHorarioValido = false;
+int petHoraAtual = 12;
+unsigned long petUltimaRecuperacaoSono = 0;
 
 
 // ---------------- ESTRELAS ----------------
@@ -1337,15 +1351,23 @@ void textoCentralizado(const char* txt, int y) {
   display.print(txt);
 }
 
-bool petGirando = false;
-unsigned long tPetGiro = 0;
-unsigned long tPetQuarto = 0;
-int petFome = 75;
-int petEnergia = 85;
-int petFelicidade = 90;
 
-unsigned long petUltimaAtualizacao = 0;
-int petTicks = 0;
+void atualizaHorarioPet() {
+  time_t agora = time(nullptr);
+
+  // Verifica se o relogio ja recebeu um horario valido
+  if (agora > 1700000000) {
+    // Horario de Brasilia: UTC-3
+    agora -= 3 * 60 * 60;
+
+    struct tm horario;
+    gmtime_r(&agora, &horario);
+
+    petHoraAtual = horario.tm_hour;
+    petHorarioValido = true;
+  }
+}
+
 
 void telaMenu() {
   unsigned long t = millis();
@@ -1441,6 +1463,7 @@ void telaMenu() {
  // PET VIRTUAL — QUARTO DO POMPOMPURIN
  // ============================================================
 
+
 void atualizaPet() {
   unsigned long agora = millis();
 
@@ -1453,40 +1476,62 @@ void atualizaPet() {
     petUltimaAtualizacao = agora;
     petTicks++;
 
-    // A fome diminui a cada minuto
+    // A fome diminui mesmo durante o sono
     if (petFome > 0) petFome--;
 
-    // Energia diminui a cada dois minutos
-    if (petTicks % 2 == 0 && petEnergia > 0) {
-      petEnergia--;
-    }
+    if (petDormindo) {
+      // Recuperacao gradual de energia
+      petEnergia += 5;
+      if (petEnergia > 100) petEnergia = 100;
+    } else {
+      if (petEnergia > 0 && petTicks % 2 == 0) {
+        petEnergia--;
+      }
 
-    // Felicidade diminui a cada três minutos
-    if (petTicks % 3 == 0 && petFelicidade > 0) {
-      petFelicidade--;
+      if (petFelicidade > 0 && petTicks % 3 == 0) {
+        petFelicidade--;
+      }
     }
   }
 }
 
 
 
+
+
 void desenhaQuarto() {
-  // Janela magica
+  bool noite = petHorarioValido &&
+               (petHoraAtual >= 18 || petHoraAtual < 6);
+
+  // Janela
   display.drawRoundRect(5, 5, 27, 23, 3, WHITE);
   display.drawFastVLine(18, 7, 19, WHITE);
   display.drawFastHLine(7, 16, 23, WHITE);
 
-  // Lua na janela
-  display.drawCircle(11, 11, 3, WHITE);
-  display.drawPixel(24, 10, WHITE);
-  display.drawPixel(26, 22, WHITE);
+  if (noite) {
+    // Lua crescente estilizada
+    display.drawCircle(11, 11, 4, WHITE);
+    display.fillCircle(13, 9, 3, BLACK);
+    display.drawPixel(24, 10, WHITE);
+    display.drawPixel(26, 22, WHITE);
+    display.drawPixel(8, 21, WHITE);
+    display.drawPixel(24, 13, WHITE);
+  } else {
+    // Sol durante o dia
+    display.drawCircle(11, 11, 3, WHITE);
+    display.drawPixel(11, 6, WHITE);
+    display.drawPixel(11, 16, WHITE);
+    display.drawPixel(6, 11, WHITE);
+    display.drawPixel(16, 11, WHITE);
+    display.drawPixel(24, 10, WHITE);
+  }
 
   // Prateleira
   display.drawFastHLine(4, 31, 28, WHITE);
   display.drawFastVLine(7, 31, 4, WHITE);
   display.drawFastVLine(29, 31, 4, WHITE);
 
-  // Quadrinho na parede
+  // Quadrinho
   display.drawRoundRect(99, 5, 23, 19, 2, WHITE);
   display.drawPixel(110, 10, WHITE);
   display.drawLine(104, 18, 110, 12, WHITE);
@@ -1495,12 +1540,12 @@ void desenhaQuarto() {
   // Chao
   display.drawFastHLine(0, 58, 128, WHITE);
 
-  // Caminha fofinha no canto inferior direito
+  // Caminha
   display.drawRoundRect(83, 43, 40, 15, 3, WHITE);
   display.drawFastHLine(86, 47, 34, WHITE);
   display.drawRoundRect(87, 44, 11, 6, 2, WHITE);
 
-  // Pezinhos da cama
+  // Pes da cama
   display.drawFastVLine(88, 58, 3, WHITE);
   display.drawFastVLine(118, 58, 3, WHITE);
 
@@ -1513,13 +1558,21 @@ void desenhaQuarto() {
   display.drawFastHLine(88, 30, 5, WHITE);
   display.drawFastVLine(90, 28, 5, WHITE);
 
-  // Vaso de plantinha
+  // Mais estrelas a noite
+  if (noite) {
+    display.drawPixel(23, 8, WHITE);
+    display.drawPixel(26, 18, WHITE);
+    display.drawPixel(15, 22, WHITE);
+  }
+
+  // Plantinha
   display.drawLine(9, 51, 9, 43, WHITE);
   display.drawLine(9, 47, 5, 44, WHITE);
   display.drawLine(9, 46, 13, 42, WHITE);
   display.drawLine(5, 52, 13, 52, WHITE);
   display.drawLine(6, 53, 12, 53, WHITE);
 }
+
 
 void desenhaPurinQuarto(int cx, int cy, bool piscando,
                         bool bocaAberta, bool deCostas,
@@ -1614,6 +1667,163 @@ void telaPetQuarto() {
     display.drawFastVLine(76, 13, 5, WHITE);
   }
 
+  
+  // -------- ANIMACAO DE DORMIR --------
+  if (petDormindo) {
+    unsigned long tempoSono = millis() - petInicioAnimacao;
+
+    int cx = 103;
+    int cy = 43;
+
+    // Fase 1: Purin pula em direcao a caminha
+    if (tempoSono < 700) {
+      cx = 62 + (41L * tempoSono / 700);
+
+      // O corpinho sobe e depois desce
+      if (tempoSono < 250) {
+        cy = 43 - (13L * tempoSono / 250);
+      } else if (tempoSono < 500) {
+        cy = 30 + (13L * (tempoSono - 250) / 250);
+      } else {
+        cy = 43;
+      }
+
+      desenhaPurinQuarto(
+        cx, cy,
+        false, false,
+        false, 0
+      );
+    } else {
+      // Fase 2: Purin se acomoda na caminha
+      bool respirar = ((tempoSono / 700) % 2 == 0);
+
+      desenhaPurinQuarto(
+        103, 43,
+        true, false,
+        false, respirar ? -1 : 0
+      );
+
+      // Fase 3: O cobertor sobe e cobre o corpinho
+      display.fillRoundRect(85, 43, 36, 13, 3, BLACK);
+      display.drawRoundRect(85, 43, 36, 13, 3, WHITE);
+
+      // Dobras do cobertor
+      display.drawFastHLine(89, 47, 27, WHITE);
+      display.drawLine(94, 48, 98, 54, WHITE);
+      display.drawLine(98, 54, 103, 48, WHITE);
+
+      // Cabecinha continua visivel acima do cobertor
+      display.drawPixel(96, 32, WHITE);
+      display.drawPixel(109, 32, WHITE);
+
+      // Fase 4: Z's flutuam enquanto ele dorme
+      if (tempoSono > 1100) {
+        int ciclo = (tempoSono / 180) % 12;
+        int zy = 29 - ciclo;
+
+        display.setTextSize(1);
+        display.setCursor(108, zy);
+        display.print("z");
+
+        display.setCursor(98, zy + 7);
+        display.print("Z");
+
+        if ((tempoSono / 500) % 2 == 0) {
+          display.drawPixel(117, zy - 2, WHITE);
+        }
+      }
+    }
+
+    display.display();
+    return;
+  }
+  // ------ FIM DA ANIMACAO DE DORMIR ------
+
+  
+  // -------- ANIMACAO DE DESPERTAR --------
+  if (petAcordando) {
+    unsigned long tempoAcordar = millis() - petInicioAnimacao;
+
+    int cx = 103;
+    int cy = 43;
+    bool olhosFechados = false;
+    bool bocaAberta = false;
+
+    if (tempoAcordar < 400) {
+      // 1. Mexe-se debaixo do cobertor
+      cx = 103 + ((tempoAcordar / 100) % 2 == 0 ? -2 : 2);
+      olhosFechados = true;
+
+      desenhaPurinQuarto(
+        cx, cy, olhosFechados, false, false, 0
+      );
+
+      display.fillRoundRect(85, 43, 36, 13, 3, BLACK);
+      display.drawRoundRect(85, 43, 36, 13, 3, WHITE);
+      display.drawFastHLine(89, 47, 27, WHITE);
+
+    } else if (tempoAcordar < 800) {
+      // 2. O cobertor escorrega para baixo
+      int deslocamento = (tempoAcordar - 400) * 15 / 400;
+
+      desenhaPurinQuarto(
+        103, 43, true, false, false, 0
+      );
+
+      display.fillRoundRect(
+        85, 43 + deslocamento, 36, 13, 3, BLACK
+      );
+      display.drawRoundRect(
+        85, 43 + deslocamento, 36, 13, 3, WHITE
+      );
+
+    } else if (tempoAcordar < 1250) {
+      // 3. Espreguica-se
+      int fase = (tempoAcordar / 150) % 2;
+      cy = fase == 0 ? 41 : 38;
+      bocaAberta = true;
+
+      desenhaPurinQuarto(
+        103, cy, false, bocaAberta, false, 0
+      );
+
+      display.drawPixel(91, 30, WHITE);
+      display.drawPixel(115, 30, WHITE);
+      display.drawFastHLine(88, 27, 4, WHITE);
+      display.drawFastHLine(114, 27, 4, WHITE);
+
+    } else if (tempoAcordar < 1750) {
+      // 4. Da um pulinho para sair da cama
+      unsigned long salto = tempoAcordar - 1250;
+
+      cx = 103 - (41L * salto / 500);
+
+      if (salto < 250) {
+        cy = 43 - (12L * salto / 250);
+      } else {
+        cy = 31 + (12L * (salto - 250) / 250);
+      }
+
+      desenhaPurinQuarto(
+        cx, cy, false, true, false, 0
+      );
+
+      display.drawPixel(cx - 12, cy - 13, WHITE);
+      display.drawPixel(cx + 12, cy - 13, WHITE);
+
+    } else {
+      // Animacao concluida
+      petAcordando = false;
+    }
+
+    if (petAcordando) {
+      display.display();
+      return;
+    }
+  }
+  // ------ FIM DA ANIMACAO DE DESPERTAR ------
+
+
   // Respiracao suave
   int respiracao = ((agora % 1800) < 900) ? 0 : -1;
 
@@ -1659,13 +1869,15 @@ void telaPetStatus() {
 
   display.drawFastHLine(0, 9, 128, WHITE);
 
+  unsigned long agora = millis();
+
   // Desenho do Purin: a expressao muda conforme os atributos
   bool cansado = petEnergia < 25;
   bool faminto = petFome < 25;
-  bool piscando = cansado || ((millis() % 3000) < 150);
-  bool bocaAberta = faminto ||
-                    (petFelicidade >= 75 &&
-                     (millis() % 2000) < 250);
+  bool piscando = petDormindo || ((agora % 3000) < 150);
+  bool bocaAberta = !petDormindo &&
+                  ((agora % 2300) > 1650 &&
+                   (agora % 2300) < 1900);
 
   desenhaPurinQuarto(
     20, 44,
@@ -1674,6 +1886,12 @@ void telaPetStatus() {
     false,
     0
   );
+
+  if (petDormindo) {
+    display.setTextSize(1);
+    display.setCursor(76, 34);
+    display.print("Zzz");
+  }
 
   // FOME
   display.setCursor(43, 12);
@@ -1797,23 +2015,34 @@ void controlarPetAcoes() {
         petAcaoMensagem = "AU AU! <3";
         break;
 
+      
       case 3:
-        // Dormir
-        petEnergia += 35;
-        if (petEnergia > 100) petEnergia = 100;
+        // Iniciar sono real
+        petDormindo = true;
+        petUltimaRecuperacaoSono = millis();
 
-        petFome -= 5;
-        if (petFome < 0) petFome = 0;
+        petTipoAnimacao = 3;
+        petInicioAnimacao = millis();
+        petAcaoAnimando = false;
+        petGirando = false;
 
         petAcaoMensagem = "ZZZ...";
-        break;
+        somConfirma();
+        telaAtual = TELA_PET_QUARTO;
+        return;
+
     }
 
-    petAcaoAte = millis() + 1800;
+    petTipoAnimacao = petAcaoSelecionada;
+    petInicioAnimacao = millis();
+
+    petAcaoAte = millis() + 2200;
     petAcaoAnimando = true;
+
     somConfirma();
   }
 }
+
 
 void telaPetAcoes() {
   display.clearDisplay();
@@ -1831,27 +2060,89 @@ void telaPetAcoes() {
     "Dormir"
   };
 
-  if (petAcaoAnimando && millis() < petAcaoAte) {
-    // Tela temporaria de reacao
-    bool pisca = ((millis() / 150) % 2 == 0);
+  unsigned long agora = millis();
+
+  if (petAcaoAnimando && agora < petAcaoAte) {
+    unsigned long tempo = agora - petInicioAnimacao;
+
+    // Movimento suave para cada acao
+    int cx = 35;
+    int cy = 39;
+    int respiracao = 0;
+    bool costas = false;
+    bool olhosFechados = false;
+    bool bocaAberta = false;
+
+    switch (petTipoAnimacao) {
+      case 0: // COMER
+        bocaAberta = (tempo % 400 < 200);
+        cy = 39;
+        break;
+
+      case 1: // BRINCAR
+        cx = 35 + ((tempo / 180) % 2 == 0 ? -5 : 5);
+        cy = 36 + ((tempo / 180) % 2 == 0 ? -4 : 2);
+        bocaAberta = true;
+        break;
+
+      case 2: // CARINHO
+        olhosFechados = (tempo % 700 < 450);
+        respiracao = (tempo % 500 < 250) ? -1 : 0;
+        bocaAberta = true;
+        break;
+
+      case 3: // DORMIR
+        olhosFechados = true;
+        respiracao = (tempo % 1000 < 500) ? -1 : 0;
+        cy = 42;
+        break;
+    }
 
     desenhaPurinQuarto(
-      35, 39,
-      pisca,
-      true,
-      false,
-      0
+      cx, cy,
+      olhosFechados,
+      bocaAberta,
+      costas,
+      respiracao
     );
 
-    display.setCursor(62, 25);
-    display.print(petAcaoMensagem);
+    // Reacoes ao lado do Purin
+    display.setCursor(66, 16);
 
-    display.setCursor(62, 39);
-    display.print("FOME ");
+    switch (petTipoAnimacao) {
+      case 0:
+        display.print("NHAM!");
+        display.setCursor(66, 25);
+        display.print("NHAM!");
+        break;
+
+      case 1:
+        display.print("UHUU!");
+        display.setCursor(66, 25);
+        display.print("* * *");
+        display.drawPixel(92, 35, WHITE);
+        display.drawPixel(102, 31, WHITE);
+        break;
+
+      case 2:
+        display.print("<3 <3");
+        display.setCursor(66, 25);
+        display.print("AMEI!");
+        break;
+
+      case 3:
+        display.print("Z z z");
+        display.setCursor(66, 25);
+        display.print("ZZZ...");
+        break;
+    }
+
+    display.setCursor(66, 41);
+    display.print("F:");
     display.print(petFome);
 
-    display.setCursor(62, 49);
-    display.print("ENERG ");
+    display.setCursor(66, 51);
+    display.print("E:");
     display.print(petEnergia);
 
   } else {
@@ -1880,6 +2171,8 @@ void telaPetAcoes() {
 
 
 
+
+
 void controlarPetQuarto() {
   if (clicou(bBack, false)) {
     somVoltar();
@@ -1888,7 +2181,30 @@ void controlarPetQuarto() {
     return;
   }
 
-  // UP abre o painel de status
+  // Dormindo: OK acorda; outras acoes ficam bloqueadas
+  
+  if (petDormindo) {
+    if (clicou(bOk, false)) {
+      petDormindo = false;
+      petAcordando = true;
+
+      petInicioAnimacao = millis();
+      petAcaoAnimando = false;
+      petGirando = false;
+
+      somConfirma();
+      esperaSoltar();
+    }
+    return;
+  }
+
+  // Enquanto acorda, espera a animacao terminar
+  if (petAcordando) {
+    return;
+  }
+
+
+  // UP abre status quando esta acordado
   if (clicou(bUp, false)) {
     somConfirma();
     esperaSoltar();
@@ -1902,6 +2218,7 @@ void controlarPetQuarto() {
     somConfirma();
   }
 }
+
 
 
 
@@ -1972,6 +2289,8 @@ void setup() {
 void loop() {
   wifiAtualiza();
   atualizaPet();
+  atualizaHorarioPet();
+
   switch (telaAtual) {
     case TELA_BOAS_VINDAS: telaBoasVindas(); break;
     case TELA_MENU:        telaMenu();       break;
