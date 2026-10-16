@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "author": "Cyberdeck da minha namorada",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": -19.2, "left": -187.16, "attrs": {} },
+    {
+      "type": "board-ssd1306",
+      "id": "oled1",
+      "top": 3.14,
+      "left": -57.37,
+      "attrs": { "i2cAddress": "0x3c" }
+    },
+    {
+      "type": "wokwi-pushbutton-6mm",
+      "id": "btn1",
+      "top": 132.2,
+      "left": -57.6,
+      "attrs": { "color": "green", "xray": "1" }
+    },
+    {
+      "type": "wokwi-pushbutton-6mm",
+      "id": "btn2",
+      "top": 161,
+      "left": -57.6,
+      "attrs": { "color": "green", "xray": "1" }
+    },
+    {
+      "type": "wokwi-pushbutton-6mm",
+      "id": "btn3",
+      "top": 132.2,
+      "left": 0,
+      "attrs": { "color": "green", "xray": "1" }
+    },
+    {
+      "type": "wokwi-pushbutton-6mm",
+      "id": "btn4",
+      "top": 132.2,
+      "left": 38.4,
+      "attrs": { "color": "green", "xray": "1" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "bz1",
+      "top": -45.6,
+      "left": -267,
+      "attrs": { "volume": "0.1" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:GND.2", "oled1:GND", "black", [ "v-28.8", "h67.2", "v19.2" ] ],
+    [ "esp:3V3", "oled1:VCC", "red", [ "h0.15", "v-38.4", "h172.8" ] ],
+    [
+      "esp:21",
+      "oled1:SDA",
+      "green",
+      [ "h9.6", "v57.6", "h134.4", "v0", "h9.6", "v-124.8", "h-57.6" ]
+    ],
+    [ "esp:22", "oled1:SCL", "green", [ "h19.2", "v76.8", "h124.8", "v-124.8", "h-57.6" ] ],
+    [ "esp:GND.1", "btn2:2.l", "black", [ "h-9.45", "v67.2", "h115.2", "v-19.2" ] ],
+    [ "btn2:2.l", "btn1:2.l", "black", [ "h-19.2", "v-28.4" ] ],
+    [ "btn2:2.l", "btn3:2.l", "black", [ "h0", "v29.2", "h57.6" ] ],
+    [ "btn3:2.l", "btn4:2.l", "black", [ "h0", "v58", "h38.4" ] ],
+    [ "esp:32", "btn1:1.l", "green", [ "h28.95", "v67.2" ] ],
+    [ "esp:33", "btn2:1.l", "green", [ "h38.55", "v86.4" ] ],
+    [ "esp:25", "btn4:1.l", "green", [ "v38.4", "h220.95" ] ],
+    [ "esp:26", "btn3:1.l", "green", [ "h0" ] ],
+    [ "esp:27", "bz1:2", "green", [ "h0" ] ],
+    [ "bz1:1", "esp:GND.1", "green", [ "v0" ] ]
+  ],
+  "dependencies": {}
+}
