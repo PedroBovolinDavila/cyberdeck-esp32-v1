@@ -59,6 +59,7 @@ enum Tela {
   TELA_VELHA_MENU,
   TELA_VELHA_JOGO,
   TELA_SUDOKU,
+  TELA_MEMORIA,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -3421,8 +3422,7 @@ void abrirJogo(int i) {
       break;
 
     case 3:
-      // Memoria: sera implementado depois.
-      avisoJogoAte = millis() + 1200;
+      memAbrir();
       break;
 
     case 4:
@@ -3536,6 +3536,8 @@ void telaJogosMenu() {
     vhIconeCard();
   } else if (jogoSel == 4) {
     sudIconeCard();
+  } else if (jogoSel == 3) { 
+    memIconeCard(); 
   } else {
     // Icone generico centralizado
     display.drawRoundRect(51, 27, 26, 19, 3, WHITE);
@@ -4745,6 +4747,867 @@ void sudTela() {
 }
 
 
+// ============================================================
+//  JOGO DA MEMORIA  (dois jogos em um: PARES e GENIUS)
+//
+//  PARES : CIMA/BAIXO = escolher carta | OK = virar | BACK = sair
+//          3 niveis: 6, 8 e 12 pares (as cartas aparecem um instante
+//          no comeco: decore!). Pontos = pares + bonus de jogadas
+//          + bonus de tempo.
+//
+//  GENIUS: os 4 botoes viram as 4 teclas (CIMA, BAIXO, OK, VOLTA).
+//          Repita a sequencia que o Purin mostrar. Toque curto em
+//          VOLTA = tecla | SEGURAR VOLTA = sair.
+//          3 niveis: 8, 12 e 16 rodadas (mais rapido a cada nivel).
+//
+//  Recorde: melhor pontuacao de cada jogo e nivel (6 recordes).
+//
+//  Cole este bloco no sketch, antes de "SETUP / LOOP".
+//  Depende de: ceuEstrelado, brilhinho, brilhinhoCor, desenhaBmp7,
+//  BMP_CORACAO (do Sudoku), desenhaConfete, somRecorde,
+//  registrarPontuacao, textoCentralizado, desenhaPurin e
+//  desenhaPurinMini (que voce ja tem).
+// ============================================================
+#define MEM_E_MODO    0     // escolher PARES ou GENIUS
+#define MEM_E_NIVEL   1     // escolher facil / medio / dificil
+#define MEM_E_PARES   2     // jogando PARES
+#define MEM_E_GENIUS  3     // jogando GENIUS
+#define MEM_E_SAIR    4     // "quer sair?"
+#define MEM_E_VIT     5     // comemorando
+#define MEM_E_FIM     6     // tela final
+
+#define MEM_G_MOSTRA  0     // Purin mostrando a sequencia
+#define MEM_G_JOGA    1     // sua vez
+#define MEM_G_ACERTO  2     // rodada completa
+#define MEM_G_ERRO    3     // errou
+
+const uint8_t  MEM_N_PARES[3]   = { 6, 8, 12 };
+const uint16_t MEM_ESPIA_MS[3]  = { 3000, 2500, 2000 };   // tempo "olhando" as cartas no comeco
+const uint16_t MEM_ERRO_MS[3]   = { 1100, 900, 700 };     // tempo vendo o par errado
+const uint8_t  MEM_G_RODADAS[3] = { 8, 12, 16 };
+const uint16_t MEM_G_DUR[3]     = { 600, 450, 330 };      // tempo aceso de cada passo
+const uint16_t MEM_G_MIN[3]     = { 380, 280, 200 };      // limite da aceleracao
+const uint16_t MEM_NOTAS[4]     = { 523, 659, 784, 1047 };
+const char* MEM_NOME_NIVEL[3]   = { "Facil", "Medio", "Dificil" };
+const char* MEM_ABREV[3]        = { "FAC", "MED", "DIF" };
+const char* MEM_INFO_PARES[3]   = { "6 pares, 4x3", "8 pares, 4x4", "12 pares, 6x4" };
+const char* MEM_INFO_GENIUS[3]  = { "8 rodadas lento", "12 rodadas medio", "16 rodadas veloz" };
+
+// 12 desenhinhos 7x7 (cada linha = 7 bits, o bit mais a esquerda e a coluna 0)
+const uint8_t MEM_SPR[12][7] = {
+  { 0b0110110, 0b1111111, 0b1111111, 0b1111111, 0b0111110, 0b0011100, 0b0001000 },  // coracao
+  { 0b0001000, 0b0001000, 0b1111111, 0b0111110, 0b0011100, 0b0110110, 0b0100010 },  // estrela
+  { 0b0011100, 0b0111000, 0b1110000, 0b1110000, 0b1110000, 0b0111000, 0b0011100 },  // lua
+  { 0b0001000, 0b1011101, 0b0111110, 0b0111110, 0b0111110, 0b1011101, 0b0001000 },  // sol
+  { 0b1000001, 0b1100011, 0b1111111, 0b1011101, 0b1111111, 0b0111110, 0b0011100 },  // gatinho
+  { 0b0011100, 0b0111110, 0b1101011, 0b1111111, 0b0001000, 0b0011100, 0b0011100 },  // cogumelo
+  { 0b0001110, 0b0001010, 0b0001010, 0b0001010, 0b0111010, 0b1111000, 0b0110000 },  // nota musical
+  { 0b0000000, 0b0111110, 0b1111111, 0b0111110, 0b0011100, 0b0001000, 0b0000000 },  // diamante
+  { 0b0011100, 0b0111110, 0b1101011, 0b1111111, 0b1011101, 0b0100010, 0b0011100 },  // carinha
+  { 0b0011100, 0b0110110, 0b0110110, 0b0011100, 0b0001000, 0b0001100, 0b0001100 },  // chavinha
+  { 0b0000000, 0b0011000, 0b0111100, 0b1111111, 0b1111111, 0b0111110, 0b0000000 },  // nuvem
+  { 0b0001000, 0b0001000, 0b0011100, 0b0111110, 0b0111110, 0b0111110, 0b0011100 }   // gotinha
+};
+
+// ---------------- estado geral ----------------
+int memEstado = MEM_E_MODO;
+int memModoSel = 0, memNivelSel = 0;      // escolhas nos menus
+int memModo = 0, memNivel = 0;            // partida atual (0 = PARES, 1 = GENIUS)
+int memRec[6] = { 0, 0, 0, 0, 0, 0 };     // recorde [modo*3 + nivel]
+int memPontos = 0;
+bool memNovoRec = false, memVenceu = false;
+unsigned long memTFim = 0, memTPausaIni = 0;
+
+// ---------------- estado do PARES ----------------
+int memCols = 4, memLinhas = 3, memCW = 26, memCH = 15, memGapX = 4, memGapY = 3, memGX = 6, memGY = 12;
+int memNCartas = 12;
+int8_t memBaralho[24];
+bool memVirada[24], memAchada[24];
+unsigned long memTMuda[24];
+int memCursor = 0, memAbertas = 0, memPrim = -1, memSeg = -1;
+int memJogadas = 0, memAchados = 0, memSegs = 0;
+bool memEspiando = false, memResolvendo = false, memAcerto = false;
+unsigned long memTInicio = 0, memTEspiaFim = 0, memTResolve = 0, memTBrilho = 0;
+int memBrilhoA = -1, memBrilhoB = -1;
+
+// ---------------- estado do GENIUS ----------------
+uint8_t memGSeq[17];
+int memGLen = 1, memGIdx = 0, memGFase = MEM_G_MOSTRA;
+int memGPad = -1, memGEsperado = 0, memGFeitas = 0, memGGanho = 0;
+unsigned long memGT = 0, memGPadAte = 0, memGBackT = 0;
+bool memGBackPend = false;
+
+// ============================================================
+//  utilidades
+// ============================================================
+void memTempoTxt(char* buf, int tam, int segs) {
+  if (segs > 5999) segs = 5999;
+  if (segs < 0) segs = 0;
+  snprintf(buf, tam, "%02d:%02d", segs / 60, segs % 60);
+}
+
+void memDesenhaSprite(int id, int cx, int cy, uint16_t cor) {
+  int ox = cx - 3, oy = cy - 3;
+  for (int r = 0; r < 7; r++)
+    for (int c = 0; c < 7; c++)
+      if (MEM_SPR[id][r] & (0x40 >> c)) display.drawPixel(ox + c, oy + r, cor);
+}
+
+// som sem travar (o buzzer fica ligado ate chamarem memTomDesliga)
+void memTomLiga(int freq) {
+  if (cfgVolume == 0) return;
+  ledcChangeFrequency(PIN_BUZZER, freq, 8);
+  ledcWrite(PIN_BUZZER, DUTY_VOLUME[cfgVolume]);
+}
+
+void memTomDesliga() {
+  ledcWrite(PIN_BUZZER, 0);
+}
+
+int memMelhorModo(int modo) {
+  int m = 0;
+  for (int n = 0; n < 3; n++) if (memRec[modo * 3 + n] > m) m = memRec[modo * 3 + n];
+  return m;
+}
+
+void memSalvaRecorde() {
+  int idx = memModo * 3 + memNivel;
+  memNovoRec = (memPontos > memRec[idx]);
+  if (memNovoRec) {
+    memRec[idx] = memPontos;
+    char k[8];
+    snprintf(k, sizeof(k), "mem%d", idx);
+    preferencias.putInt(k, memPontos);
+    registrarPontuacao(3, memPontos);        // aparece como "R:" no Game Center
+  }
+}
+
+void memEntraFim(unsigned long t) {
+  memTomDesliga();
+  memGPad = -1;
+  memEstado = MEM_E_FIM;
+  memTFim = t;
+  if (memNovoRec) somRecorde();
+  else if (memVenceu) {
+    tocaTom(1319, 80, false);
+    tocaTom(1568, 80, false);
+    tocaTom(2093, 160, false);
+  }
+}
+
+void memAbrir() {                            // chamado pelo menu dos jogos
+  char k[8];
+  for (int i = 0; i < 6; i++) {
+    snprintf(k, sizeof(k), "mem%d", i);
+    memRec[i] = preferencias.getInt(k, 0);
+  }
+  memEstado = MEM_E_MODO;
+  telaAtual = TELA_MEMORIA;
+}
+
+// ============================================================
+//  PARES
+// ============================================================
+void memConfigPares() {
+  if (memNivel == 0)      { memCols = 4; memLinhas = 3; memCW = 26; memCH = 15; memGapX = 4; memGapY = 3; memGX = 6; memGY = 12; }
+  else if (memNivel == 1) { memCols = 4; memLinhas = 4; memCW = 26; memCH = 11; memGapX = 4; memGapY = 2; memGX = 6; memGY = 13; }
+  else                    { memCols = 6; memLinhas = 4; memCW = 17; memCH = 11; memGapX = 3; memGapY = 2; memGX = 5; memGY = 13; }
+  memNCartas = memCols * memLinhas;
+}
+
+void memEmbaralha(int8_t* a, int n) {
+  for (int i = n - 1; i > 0; i--) {
+    int j = random(i + 1);
+    int8_t tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+}
+
+void memNovoPares() {
+  memConfigPares();
+  int P = MEM_N_PARES[memNivel];
+  int8_t simb[12];
+  for (int i = 0; i < 12; i++) simb[i] = i;
+  memEmbaralha(simb, 12);                    // escolhe P desenhos diferentes
+  for (int k = 0; k < P; k++) { memBaralho[2 * k] = simb[k]; memBaralho[2 * k + 1] = simb[k]; }
+  memEmbaralha(memBaralho, memNCartas);
+
+  unsigned long t = millis();
+  for (int i = 0; i < memNCartas; i++) { memVirada[i] = true; memAchada[i] = false; memTMuda[i] = t; }
+  memCursor = 0; memAbertas = 0; memPrim = -1; memSeg = -1;
+  memJogadas = 0; memAchados = 0; memSegs = 0; memPontos = 0;
+  memResolvendo = false; memNovoRec = false; memVenceu = false;
+  memBrilhoA = -1; memBrilhoB = -1; memTBrilho = 0;
+  memEspiando = true;                        // comeca mostrando todas as cartas
+  memTEspiaFim = t + MEM_ESPIA_MS[memNivel] + 300;
+  memTInicio = t;
+  memEstado = MEM_E_PARES;
+}
+
+void memAjustaCursor() {                     // pula cartas viradas ou ja achadas
+  if (!memAchada[memCursor] && !memVirada[memCursor]) return;
+  for (int p = 1; p <= memNCartas; p++) {
+    int idx = (memCursor + p) % memNCartas;
+    if (!memAchada[idx] && !memVirada[idx]) { memCursor = idx; return; }
+  }
+}
+
+void memMoveCursor(int dir) {
+  for (int p = 1; p <= memNCartas; p++) {
+    int idx = (((memCursor + dir * p) % memNCartas) + memNCartas) % memNCartas;
+    if (!memAchada[idx] && !memVirada[idx]) { memCursor = idx; return; }
+  }
+}
+
+void memVence(unsigned long t) {
+  memSegs = (int)((t - memTInicio) / 1000);
+  if (memSegs < 1) memSegs = 1;
+  int P = MEM_N_PARES[memNivel];
+  int bJog = P * 3 - memJogadas;             // quanto menos jogadas, melhor
+  if (bJog < 0) bJog = 0;
+  int bTemp = P * 6 - memSegs;               // quanto mais rapido, melhor
+  if (bTemp < 0) bTemp = 0;
+  memPontos = P * 100 + bJog * 20 + bTemp * 5;
+  memVenceu = true;
+  memSalvaRecorde();
+  memTFim = t;
+  memEstado = MEM_E_VIT;
+}
+
+void memViraCarta(int i, unsigned long t) {
+  memVirada[i] = true;
+  memTMuda[i] = t;
+  tocaTom(1200 + (i % 4) * 90, 14, false);
+  if (memAbertas == 0) {
+    memPrim = i;
+    memAbertas = 1;
+    memAjustaCursor();
+  } else {
+    memSeg = i;
+    memAbertas = 2;
+    memJogadas++;
+    memResolvendo = true;
+    memAcerto = (memBaralho[memPrim] == memBaralho[memSeg]);
+    memTResolve = t + (memAcerto ? 450 : MEM_ERRO_MS[memNivel]);
+  }
+}
+
+void memResolve(unsigned long t) {
+  memResolvendo = false;
+  if (memAcerto) {
+    memAchada[memPrim] = true;
+    memAchada[memSeg] = true;
+    memBrilhoA = memPrim; memBrilhoB = memSeg; memTBrilho = t;
+    memAchados++;
+    tocaTom(1319, 60, false);
+    tocaTom(1760, 90, false);
+  } else {
+    memVirada[memPrim] = false; memTMuda[memPrim] = t;
+    memVirada[memSeg]  = false; memTMuda[memSeg]  = t;
+    tocaTom(330, 70, false);
+  }
+  memAbertas = 0; memPrim = -1; memSeg = -1;
+  if (memAcerto && memAchados >= MEM_N_PARES[memNivel]) { memVence(t); return; }
+  memAjustaCursor();
+}
+
+void memParesAtualiza(unsigned long t, bool bu, bool bd, bool bo) {
+  if (memEspiando) {                         // fim do "olhe bem!": vira tudo de volta
+    if (t >= memTEspiaFim) {
+      for (int i = 0; i < memNCartas; i++) { memVirada[i] = false; memTMuda[i] = t; }
+      memEspiando = false;
+      memTInicio = t;
+      memCursor = 0;
+      tocaTom(1047, 40, false);
+    }
+    return;
+  }
+  if (memResolvendo) {
+    bool pular = (!memAcerto && bo && t + MEM_ERRO_MS[memNivel] >= memTResolve + 500);
+    if (t >= memTResolve || pular) memResolve(t);
+    return;
+  }
+  if (bu) { memMoveCursor(-1); somTique(); }
+  if (bd) { memMoveCursor(+1); somTique(); }
+  if (bo && !memVirada[memCursor] && !memAchada[memCursor]) memViraCarta(memCursor, t);
+}
+
+void memDesenhaCarta(int i, unsigned long t) {
+  int x = memGX + (i % memCols) * (memCW + memGapX);
+  int y = memGY + (i / memCols) * (memCH + memGapY);
+  unsigned long dt = t - memTMuda[i];
+  bool face = memVirada[i];
+  int w = memCW;
+  if (dt < 180) {                            // animacao: estreita, troca de lado e abre
+    float u = dt / 180.0f;
+    if (u < 0.5f) { face = !face; w = (int)(memCW * (1.0f - 2.0f * u)); }
+    else          { w = (int)(memCW * (2.0f * u - 1.0f)); }
+    if (w < 3) w = 3;
+  }
+  int xx = x + (memCW - w) / 2;
+  int cx = x + memCW / 2, cy = y + memCH / 2;
+  int r = (memCH >= 14) ? 3 : 2;
+
+  if (face && memAchada[i]) {                // par achado: cartinha "branquinha"
+    display.fillRoundRect(xx, y, w, memCH, r, WHITE);
+    if (w >= 9) memDesenhaSprite(memBaralho[i], cx, cy, BLACK);
+  } else if (face) {
+    display.drawRoundRect(xx, y, w, memCH, r, WHITE);
+    if (w >= 9) memDesenhaSprite(memBaralho[i], cx, cy, WHITE);
+  } else {                                   // costas da carta: brilhinho no meio
+    display.drawRoundRect(xx, y, w, memCH, r, WHITE);
+    if (w >= 7) brilhinho(cx, cy, (memCH >= 14) ? 2 : 1);
+  }
+
+  // cursor piscando
+  bool sel = (i == memCursor) && memEstado == MEM_E_PARES && !memEspiando &&
+             !memResolvendo && !memAchada[i] && !memVirada[i];
+  if (sel && ((t / 300) % 2 == 0)) display.fillRect(x + 1, y + 1, memCW - 2, memCH - 2, INVERSE);
+
+  // brilhinhos quando acha um par
+  if (t - memTBrilho < 700 && (i == memBrilhoA || i == memBrilhoB)) {
+    int rr = ((t / 120) % 2) ? 2 : 1;
+    brilhinho(x + memCW - 1, y, rr);
+    brilhinho(x, y + memCH - 1, 1);
+  }
+}
+
+void memDesenhaPares(unsigned long t) {
+  char buf[16], tb[8];
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  snprintf(buf, sizeof(buf), "J:%d", memJogadas);
+  display.setCursor(3, 1);
+  display.print(buf);
+  if (memEspiando && (t / 300) % 2 == 0) textoCentralizado("OLHE BEM!", 1);
+  else                                   textoCentralizado("PARES", 1);
+
+  unsigned long fim = t;
+  if (memEstado == MEM_E_VIT)       fim = memTFim;
+  else if (memEstado == MEM_E_SAIR) fim = memTPausaIni;
+  int segs = memEspiando ? 0 : (int)((fim - memTInicio) / 1000);
+  memTempoTxt(tb, sizeof(tb), segs);
+  display.setCursor(95, 1);
+  display.print(tb);
+  display.setTextColor(WHITE);
+
+  for (int i = 0; i < memNCartas; i++) memDesenhaCarta(i, t);
+}
+
+// ============================================================
+//  GENIUS
+// ============================================================
+void memNovoGenius() {
+  unsigned long t = millis();
+  memGLen = 1;
+  memGSeq[0] = random(4);
+  memGIdx = 0;
+  memGFase = MEM_G_MOSTRA;
+  memGT = t + 800;
+  memGPad = -1;
+  memGFeitas = 0; memGGanho = 0; memPontos = 0;
+  memGBackPend = false;
+  memNovoRec = false; memVenceu = false;
+  memEstado = MEM_E_GENIUS;
+}
+
+int memGDur() {
+  int d = (int)MEM_G_DUR[memNivel] - memGLen * 12;
+  if (d < (int)MEM_G_MIN[memNivel]) d = MEM_G_MIN[memNivel];
+  return d;
+}
+
+void memGAcende(int pad, int ms, unsigned long t) {
+  memGPad = pad;
+  memGPadAte = t + ms;
+  memTomLiga(MEM_NOTAS[pad]);
+}
+
+void memGJogada(int pad, unsigned long t) {
+  if (pad != 3) memGAcende(pad, 250, t);
+  if (pad == memGSeq[memGIdx]) {
+    memGIdx++;
+    if (memGIdx >= memGLen) {                // rodada completa
+      int ganho = memGLen * 10 * (memNivel + 1);
+      memPontos += ganho;
+      memGGanho = ganho;
+      memGFeitas = memGLen;
+      if (memGLen >= MEM_G_RODADAS[memNivel]) {          // zerou o nivel!
+        memPontos += 100 * (memNivel + 1);
+        memVenceu = true;
+        memTomDesliga();
+        memGPad = -1;
+        memSalvaRecorde();
+        memTFim = t;
+        memEstado = MEM_E_VIT;
+        return;
+      }
+      memGFase = MEM_G_ACERTO;
+      memGT = t + 900;
+    }
+  } else {                                   // errou
+    memGEsperado = memGSeq[memGIdx];
+    memGFase = MEM_G_ERRO;
+    memGT = t;
+    memTomDesliga();
+    memGPad = -1;
+    somErro();
+  }
+}
+
+void memGeniusAtualiza(unsigned long t, bool bu, bool bd, bool bo, bool bb) {
+  // apaga o pad (e o som) quando o tempo dele acabar
+  if (memGPad >= 0 && t >= memGPadAte) { memGPad = -1; memTomDesliga(); }
+
+  // VOLTA: toque curto = tecla | segurar = sair
+  bool backBaixo = !digitalRead(PIN_BTN_BACK);
+  if (bb) {
+    memGBackT = t;
+    memGBackPend = true;
+    if (memGFase == MEM_G_JOGA) memGAcende(3, 250, t);
+  }
+  if (memGBackPend) {
+    unsigned long seg = t - memGBackT;
+    if (!backBaixo) {                        // soltou
+      memGBackPend = false;
+      if (seg < 600 && memGFase == MEM_G_JOGA) { memGJogada(3, t); return; }
+    } else if (seg >= 1300) {                // segurou: pergunta se quer sair
+      memGBackPend = false;
+      memTomDesliga();
+      memGPad = -1;
+      memTPausaIni = t;
+      memEstado = MEM_E_SAIR;
+      esperaSoltar();
+      return;
+    }
+  }
+
+  if (memGFase == MEM_G_MOSTRA) {
+    if (t >= memGT) {
+      if (memGIdx >= memGLen) { memGFase = MEM_G_JOGA; memGIdx = 0; }
+      else {
+        int dur = memGDur();
+        memGAcende(memGSeq[memGIdx], dur, t);
+        memGT = t + dur + dur / 3 + 60;
+        memGIdx++;
+      }
+    }
+  }
+  else if (memGFase == MEM_G_JOGA) {
+    if (bu) { memGJogada(0, t); return; }
+    if (bd) { memGJogada(1, t); return; }
+    if (bo) { memGJogada(2, t); return; }
+  }
+  else if (memGFase == MEM_G_ACERTO) {
+    if (t >= memGT) {                        // acrescenta mais um passo
+      memGSeq[memGLen] = random(4);
+      memGLen++;
+      memGIdx = 0;
+      memGFase = MEM_G_MOSTRA;
+      memGT = t + 400;
+    }
+  }
+  else if (memGFase == MEM_G_ERRO) {
+    if (t - memGT > 1300) {                  // acabou: tela final
+      memVenceu = false;
+      memSalvaRecorde();
+      memEntraFim(t);
+    }
+  }
+}
+
+void memDesenhaPad(int i, bool aceso, unsigned long t) {
+  const int x = 3 + i * 31, y = 16, w = 28, h = 32;
+  int cx = x + w / 2, cy = y + h / 2;
+  uint16_t cor = aceso ? BLACK : WHITE;
+  if (aceso) display.fillRoundRect(x, y, w, h, 5, WHITE);
+  else       display.drawRoundRect(x, y, w, h, 5, WHITE);
+
+  switch (i) {
+    case 0:   // CIMA
+      if (aceso) display.fillTriangle(cx, cy - 8, cx - 9, cy + 7, cx + 9, cy + 7, cor);
+      else       display.drawTriangle(cx, cy - 8, cx - 9, cy + 7, cx + 9, cy + 7, cor);
+      break;
+    case 1:   // BAIXO
+      if (aceso) display.fillTriangle(cx, cy + 8, cx - 9, cy - 7, cx + 9, cy - 7, cor);
+      else       display.drawTriangle(cx, cy + 8, cx - 9, cy - 7, cx + 9, cy - 7, cor);
+      break;
+    case 2:   // OK (estrelinha)
+      brilhinhoCor(cx, cy, 8, cor);
+      display.drawLine(cx - 5, cy - 5, cx + 5, cy + 5, cor);
+      display.drawLine(cx - 5, cy + 5, cx + 5, cy - 5, cor);
+      break;
+    case 3:   // VOLTA
+      if (aceso) display.fillTriangle(cx - 9, cy, cx + 7, cy - 8, cx + 7, cy + 8, cor);
+      else       display.drawTriangle(cx - 9, cy, cx + 7, cy - 8, cx + 7, cy + 8, cor);
+      break;
+  }
+
+  if (aceso) {                               // brilhinhos em cima do pad aceso
+    int rr = ((t / 110) % 2) ? 2 : 1;
+    brilhinho(x + 4, 12, rr);
+    brilhinho(x + w - 5, 12, 3 - rr);
+  }
+}
+
+void memDesenhaGenius(unsigned long t) {
+  char buf[20];
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(3, 1);
+  display.print("GENIUS");
+  snprintf(buf, sizeof(buf), "R%d/%d", memGLen, (int)MEM_G_RODADAS[memNivel]);
+  display.setCursor(50, 1);
+  display.print(buf);
+  snprintf(buf, sizeof(buf), "%d", memPontos);
+  display.setCursor(125 - (int)strlen(buf) * 6, 1);
+  display.print(buf);
+  display.setTextColor(WHITE);
+
+  ceuEstrelado(2, 12, 125, 13, 6, 41);       // estrelinhas acima dos pads
+
+  int aceso = memGPad;
+  if (memGFase == MEM_G_ERRO && ((t / 180) % 2 == 0)) aceso = memGEsperado;
+  for (int i = 0; i < 4; i++) memDesenhaPad(i, i == aceso, t);
+
+  // mensagem de baixo
+  bool segurando = memGBackPend && (t - memGBackT) > 600;
+  if (segurando) {
+    int p = (int)(((t - memGBackT) - 600) * 100 / 700);
+    if (p > 100) p = 100;
+    display.setCursor(66, 54);
+    display.print("sair...");
+    display.drawRect(3, 55, 58, 6, WHITE);
+    display.fillRect(5, 57, (54 * p) / 100, 2, WHITE);
+  } else {
+    display.setCursor(3, 54);
+    if (memGFase == MEM_G_MOSTRA) {
+      if (memGLen == 1 && (t / 1500) % 2 == 1) display.print("VOLTA longa: sair");
+      else                                      display.print("OBSERVE...");
+    } else if (memGFase == MEM_G_JOGA) {
+      snprintf(buf, sizeof(buf), "SUA VEZ %d/%d", memGIdx + 1, memGLen);
+      display.print(buf);
+    } else if (memGFase == MEM_G_ACERTO) {
+      snprintf(buf, sizeof(buf), "BOA! +%d", memGGanho);
+      display.print(buf);
+    } else {
+      display.print("OPS! era este");
+    }
+  }
+  desenhaPurinMini(112, 51, 0, (t % 3000) < 130);
+}
+
+// ============================================================
+//  TELAS DE ESCOLHA
+// ============================================================
+void memDesenhaEscolhaModo(unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  ceuEstrelado(0, 10, 127, 12, 5, 61);
+  ceuEstrelado(0, 61, 127, 63, 6, 62);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  textoCentralizado("MEMORIA", 1);
+  display.setTextColor(WHITE);
+
+  const char* nomes[2] = { "PARES", "GENIUS" };
+  for (int i = 0; i < 2; i++) {
+    int x = 4 + i * 62, y = 13, w = 58, h = 37;
+    bool sel = (i == memModoSel);
+    uint16_t cor = sel ? BLACK : WHITE;
+    uint16_t inv = sel ? WHITE : BLACK;
+    if (sel) display.fillRoundRect(x, y, w, h, 4, WHITE);
+    else     display.drawRoundRect(x, y, w, h, 4, WHITE);
+
+    if (i == 0) {                            // mini cartinhas 3x2
+      int cyc = (int)((t / 600) % 3);
+      int x0 = x + w / 2 - 19, y0 = y + 4;
+      for (int r = 0; r < 2; r++) {
+        for (int c = 0; c < 3; c++) {
+          int cx = x0 + c * 14, cy = y0 + r * 12;
+          if (c == cyc) {
+            display.fillRoundRect(cx, cy, 11, 9, 2, cor);
+            memDesenhaSprite(c, cx + 5, cy + 4, inv);
+          } else {
+            display.drawRoundRect(cx, cy, 11, 9, 2, cor);
+            display.drawPixel(cx + 5, cy + 4, cor);
+          }
+        }
+      }
+    } else {                                 // mini pads
+      int lit = (int)((t / 450) % 4);
+      int x0 = x + w / 2 - 26, y0 = y + 5;
+      for (int k = 0; k < 4; k++) {
+        int px = x0 + k * 14;
+        if (k == lit) display.fillRoundRect(px, y0, 11, 16, 3, cor);
+        else          display.drawRoundRect(px, y0, 11, 16, 3, cor);
+      }
+    }
+
+    display.setTextColor(cor);
+    display.setCursor(x + (w - (int)strlen(nomes[i]) * 6) / 2, y + 26);
+    display.print(nomes[i]);
+    display.setTextColor(WHITE);
+
+    if (sel) {
+      if ((t / 300) % 2 == 0) brilhinho(x - 2, y + 18, 1);
+      else                    brilhinho(x + w + 1, y + 18, 1);
+    }
+  }
+
+  char buf[24];
+  int melhor = memMelhorModo(memModoSel);
+  if (melhor > 0) snprintf(buf, sizeof(buf), "melhor %d", melhor);
+  else            snprintf(buf, sizeof(buf), "sem recorde ainda");
+  textoCentralizado(buf, 53);
+}
+
+void memDesenhaEscolhaNivel(unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  ceuEstrelado(0, 11, 4, 51, 3, 64);
+  ceuEstrelado(123, 11, 127, 51, 3, 65);
+  ceuEstrelado(0, 62, 100, 63, 4, 66);
+
+  const char* titulo = (memModoSel == 0) ? "PARES: NIVEL" : "GENIUS: NIVEL";
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor((SCREEN_W - (int)strlen(titulo) * 6) / 2, 1);
+  display.print(titulo);
+  display.setTextColor(WHITE);
+
+  char buf[16];
+  for (int i = 0; i < 3; i++) {
+    int y = 13 + i * 13;
+    bool sel = (i == memNivelSel);
+    uint16_t cor = sel ? BLACK : WHITE;
+    if (sel) display.fillRoundRect(6, y, 116, 12, 3, WHITE);
+    else     display.drawRoundRect(6, y, 116, 12, 3, WHITE);
+
+    display.setTextColor(cor);
+    display.setCursor(12, y + 2);
+    display.print(MEM_NOME_NIVEL[i]);
+
+    for (int k = 0; k < 3; k++) {            // 1, 2 ou 3 brilhinhos
+      int bx = 64 + k * 9, by = y + 6;
+      if (k <= i) {
+        int r = (sel && ((t / 300) + k) % 2 == 0) ? 3 : 2;
+        brilhinhoCor(bx, by, r, cor);
+      } else {
+        display.drawPixel(bx, by, cor);
+      }
+    }
+
+    int m = memRec[memModoSel * 3 + i];
+    if (m > 0) snprintf(buf, sizeof(buf), "%d", m);
+    else       snprintf(buf, sizeof(buf), "--");
+    display.setCursor(94, y + 2);
+    display.print(buf);
+    display.setTextColor(WHITE);
+  }
+
+  display.setCursor(2, 55);
+  display.print(memModoSel == 0 ? MEM_INFO_PARES[memNivelSel] : MEM_INFO_GENIUS[memNivelSel]);
+  desenhaPurinMini(112, 51, 0, (t % 3000) < 130);
+}
+
+// ============================================================
+//  TELA FINAL
+// ============================================================
+void memDesenhaFim(unsigned long t) {
+  char buf[24], tb[8];
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  ceuEstrelado(0, 0, 46, 63, 8, 6);
+
+  if (memNovoRec) {
+    desenhaConfete(t);
+    desenhaBmp7(8, 22 - (int)((t / 120) % 8), BMP_CORACAO, 6, 1);
+    desenhaBmp7(41, 28 - (int)((t / 150) % 8), BMP_CORACAO, 6, 1);
+  }
+  if (memNovoRec || memVenceu) {
+    float fase = (t % 700) / 700.0f;
+    int pulo = (int)(4 * fase * (1 - fase) * 8);          // Purin pulando de alegria
+    desenhaPurin(24, 58, pulo, 0);
+  } else {
+    desenhaPurin(24, 58, 0, 0);
+  }
+
+  display.setCursor(52, 5);
+  display.print(memVenceu ? "PARABENS!" : "FIM DE JOGO");
+
+  if (memModo == 0) {
+    memTempoTxt(tb, sizeof(tb), memSegs);
+    snprintf(buf, sizeof(buf), "%dj %s", memJogadas, tb);
+  } else {
+    snprintf(buf, sizeof(buf), "rodada %d/%d", memGFeitas, (int)MEM_G_RODADAS[memNivel]);
+  }
+  display.setCursor(52, 15);
+  display.print(buf);
+
+  snprintf(buf, sizeof(buf), "pts %d", memPontos);
+  display.setCursor(52, 25);
+  display.print(buf);
+
+  if (memNovoRec) {
+    if ((t / 250) % 2 == 0) {
+      display.setCursor(52, 35);
+      display.print("* RECORDE *");
+    }
+  } else {
+    snprintf(buf, sizeof(buf), "melhor %d", memRec[memModo * 3 + memNivel]);
+    display.setCursor(52, 35);
+    display.print(buf);
+  }
+  display.setCursor(52, 46); display.print("OK: de novo");
+  display.setCursor(52, 55); display.print("BACK: sair");
+}
+
+// ============================================================
+//  ICONE NO GAME CENTER
+// ============================================================
+void memIconeCard() {
+  unsigned long t = millis();
+  const int x0 = 45, y0 = 25;                // 3x2 cartinhas de 11x10
+  int lit = (int)((t / 650) % 3);
+  for (int r = 0; r < 2; r++) {
+    for (int c = 0; c < 3; c++) {
+      int x = x0 + c * 14, y = y0 + r * 13;
+      if (c == lit) {
+        display.fillRoundRect(x, y, 11, 10, 2, WHITE);
+        memDesenhaSprite(c, x + 5, y + 5, BLACK);
+      } else {
+        display.drawRoundRect(x, y, 11, 10, 2, WHITE);
+        display.drawPixel(x + 5, y + 5, WHITE);
+      }
+    }
+  }
+  if ((t / 400) % 2 == 0) { brilhinho(38, 30, 1); brilhinho(88, 44, 2); }
+  else                    { brilhinho(39, 44, 2); brilhinho(87, 30, 1); }
+}
+
+// ============================================================
+//  TELA PRINCIPAL DA MEMORIA
+// ============================================================
+void memTela() {
+  ultimaAtividade = millis();
+  unsigned long t = millis();
+  bool rep = (memEstado != MEM_E_GENIUS);    // no Genius os botoes nao repetem
+  bool bu = clicou(bUp, rep);
+  bool bd = clicou(bDown, rep);
+  bool bo = clicou(bOk, false);
+  bool bb = clicou(bBack, false);
+
+  // ----- escolher jogo -----
+  if (memEstado == MEM_E_MODO) {
+    if (bu || bd) { memModoSel = 1 - memModoSel; somTique(); }
+    if (bo) { somConfirma(); memEstado = MEM_E_NIVEL; return; }
+    if (bb) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+    memDesenhaEscolhaModo(t);
+    display.display();
+    return;
+  }
+
+  // ----- escolher nivel -----
+  if (memEstado == MEM_E_NIVEL) {
+    if (bu) { memNivelSel = (memNivelSel + 2) % 3; somTique(); }
+    if (bd) { memNivelSel = (memNivelSel + 1) % 3; somTique(); }
+    if (bo) {
+      somConfirma();
+      esperaSoltar();
+      memModo = memModoSel;
+      memNivel = memNivelSel;
+      if (memModo == 0) memNovoPares(); else memNovoGenius();
+      return;
+    }
+    if (bb) { somVoltar(); memEstado = MEM_E_MODO; return; }
+    memDesenhaEscolhaNivel(t);
+    display.display();
+    return;
+  }
+
+  // ----- jogando PARES -----
+  if (memEstado == MEM_E_PARES) {
+    if (bb) { somVoltar(); memTPausaIni = t; memEstado = MEM_E_SAIR; return; }
+    memParesAtualiza(t, bu, bd, bo);
+    if (memEstado != MEM_E_PARES) return;
+    memDesenhaPares(t);
+    display.display();
+    return;
+  }
+
+  // ----- jogando GENIUS -----
+  if (memEstado == MEM_E_GENIUS) {
+    memGeniusAtualiza(t, bu, bd, bo, bb);
+    if (memEstado != MEM_E_GENIUS) return;
+    memDesenhaGenius(t);
+    display.display();
+    return;
+  }
+
+  // ----- "quer sair?" -----
+  if (memEstado == MEM_E_SAIR) {
+    if (bo) { somVoltar(); memTomDesliga(); memEstado = MEM_E_MODO; return; }
+    if (bb) {                                // continua: desconta o tempo parado
+      unsigned long pausa = t - memTPausaIni;
+      somConfirma();
+      if (memModo == 0) {
+        memTInicio += pausa;
+        memTEspiaFim += pausa;
+        memTResolve += pausa;
+        memEstado = MEM_E_PARES;
+      } else {
+        if (memGFase == MEM_G_ACERTO) { memGT = t + 400; }
+        else { memGFase = MEM_G_MOSTRA; memGIdx = 0; memGT = t + 700; }
+        memGBackPend = false;
+        memEstado = MEM_E_GENIUS;
+      }
+      return;
+    }
+    if (memModo == 0) memDesenhaPares(t); else memDesenhaGenius(t);
+    display.fillRoundRect(10, 18, 108, 28, 4, BLACK);
+    display.drawRoundRect(10, 18, 108, 28, 4, WHITE);
+    textoCentralizado("SAIR DO JOGO?", 23);
+    textoCentralizado("OK:sim BACK:nao", 34);
+    display.display();
+    return;
+  }
+
+  // ----- comemorando -----
+  if (memEstado == MEM_E_VIT) {
+    if (t - memTFim > 1400) { memEntraFim(t); return; }
+    if (memModo == 0) memDesenhaPares(t); else memDesenhaGenius(t);
+    desenhaConfete(t - memTFim);
+    display.display();
+    return;
+  }
+
+  // ----- tela final -----
+  if (t - memTFim > 700) {                   // evita apertar sem querer
+    if (bo) {
+      somConfirma();
+      esperaSoltar();
+      if (memModo == 0) memNovoPares(); else memNovoGenius();
+      return;
+    }
+    if (bb) { somVoltar(); memEstado = MEM_E_MODO; return; }
+  }
+  memDesenhaFim(t - memTFim);
+  display.display();
+}
+
+
 
 // ---------------- SETUP / LOOP ----------------
 void setup() {
@@ -4842,6 +5705,7 @@ void loop() {
     case TELA_VELHA_MENU: vhTelaMenu(); break;
     case TELA_VELHA_JOGO: vhTelaJogo(); break;
     case TELA_SUDOKU: sudTela(); break;
+    case TELA_MEMORIA: memTela(); break;
 
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
