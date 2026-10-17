@@ -67,6 +67,11 @@ int cfgTempoDescanso = 60;     // segundos; 0 = desativado
 int cfgCategoria = 0;
 int cfgOpcao = 0;
 int cfgTelaOpcao = 0;
+int cfgSomOpcao = 0;               // 0 = volume | 1 = som das teclas
+
+// protecao de tela (descanso)
+bool descansando = false;
+unsigned long ultimaAtividade = 0;
 
 const char* cfgCategorias[] = {
   "TELA",
@@ -327,28 +332,43 @@ bool clicou(Botao &b, bool repetir) {
 }
 
 // ---------------- SOM ----------------
-void beep(int freq, int ms) {
-  tone(PIN_BUZZER, freq, ms);
-  delay(ms);
-  noTone(PIN_BUZZER);
+// ---------------- SOM ----------------
+// Volume: 0 = mudo | 1 = baixo | 2 = medio | 3 = alto
+// (no buzzer passivo o volume vem do "duty" do PWM)
+const uint8_t DUTY_VOLUME[4] = { 0, 12, 50, 128 };   // 0 a 255
+
+void iniciaBuzzer() {
+  ledcAttach(PIN_BUZZER, 2000, 8);   // pino, frequencia inicial, resolucao
+  ledcWrite(PIN_BUZZER, 0);
 }
 
+// tecla = true  -> som de interface (respeita "Som teclas")
+// tecla = false -> som do sistema (so o MUDO silencia)
+void tocaTom(int freq, int ms, bool tecla) {
+  if (cfgVolume == 0) return;
+  if (tecla && !cfgSomTeclas) return;
+  ledcChangeFrequency(PIN_BUZZER, freq, 8);
+  ledcWrite(PIN_BUZZER, DUTY_VOLUME[cfgVolume]);
+  delay(ms);
+  ledcWrite(PIN_BUZZER, 0);
+}
+
+void beep(int freq, int ms) { tocaTom(freq, ms, true); }
+
 void somLigar() {
-  beep(784, 80);    // sol
-  beep(988, 80);    // si
-  beep(1319, 140);  // mi
+  tocaTom(784, 80, false);    // sol
+  tocaTom(988, 80, false);    // si
+  tocaTom(1319, 140, false);  // mi
 }
 
 void somTique()    { beep(2400, 8); }    // navegar no menu
 void somConfirma() { beep(1568, 60); }   // OK
-void somErro() {
-  tone(PIN_BUZZER, 220, 180);
-  delay(220);
-  tone(PIN_BUZZER, 160, 250);
-  delay(270);
-  noTone(PIN_BUZZER);
-}
 void somVoltar()   { beep(988, 60); }    // BACK
+void somErro() {
+  tocaTom(220, 180, false);
+  delay(40);
+  tocaTom(160, 250, false);
+}
 
 // ---------------- BOOT (terminal) ----------------
 void digita(const char* texto) {
@@ -2404,6 +2424,7 @@ void controlarConfiguracoes() {
       cfgTelaOpcao = 0;
       telaAtual = TELA_CFG_TELA;
     } else if (cfgCategoria == 1) {
+      cfgSomOpcao = 0;
       telaAtual = TELA_CFG_SOM;
     } else {
       cfgOpcao = 0;
@@ -2538,6 +2559,135 @@ void controlarConfigTela() {
   }
 }
 
+// ============================================================
+//  CONFIG > SOM
+//  CIMA/BAIXO escolhem a linha | OK muda o valor | BACK salva e volta
+// ============================================================
+void telaConfigSom() {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 60, 5, WHITE);
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(15, 7);
+  display.print("CONFIG > SOM");
+  display.drawFastHLine(8, 18, 112, WHITE);
+
+  for (int i = 0; i < 2; i++) {
+    int y = 22 + i * 20;
+    bool sel = (i == cfgSomOpcao);
+    uint16_t cor = sel ? BLACK : WHITE;
+
+    if (sel) display.fillRoundRect(7, y, 114, 17, 3, WHITE);
+    display.setTextColor(cor);
+
+    if (i == 0) {
+      display.setCursor(11, y + 5);
+      display.print("Volume");
+
+      if (cfgVolume == 0) {
+        display.setCursor(80, y + 5);
+        display.print("MUDO");
+      } else {
+        // 3 barrinhas crescentes
+        for (int b = 0; b < 3; b++) {
+          int bx = 80 + b * 12;
+          int bh = 4 + b * 3;
+          int topo = (y + 14) - bh;
+          if (cfgVolume > b) display.fillRect(bx, topo, 8, bh, cor);
+          else               display.drawRect(bx, topo, 8, bh, cor);
+        }
+      }
+    } else {
+      display.setCursor(11, y + 5);
+      display.print("Som teclas");
+      display.setCursor(92, y + 5);
+      display.print(cfgSomTeclas ? "ON" : "OFF");
+    }
+  }
+
+  display.setTextColor(WHITE);
+  display.display();
+}
+
+void controlarConfigSom() {
+  if (clicou(bBack, false)) {
+    somVoltar();
+    salvarConfiguracoes();
+    esperaSoltar();
+    telaAtual = TELA_CONFIGURACOES;
+    return;
+  }
+
+  if (clicou(bUp, false) || clicou(bDown, false)) {
+    cfgSomOpcao = 1 - cfgSomOpcao;
+    somTique();
+    esperaSoltar();
+  }
+
+  if (clicou(bOk, false)) {
+    if (cfgSomOpcao == 0) {
+      cfgVolume = (cfgVolume + 1) % 4;       // 0 > 1 > 2 > 3 > 0
+      tocaTom(1568, 80, false);              // toca um teste no novo volume
+    } else {
+      cfgSomTeclas = !cfgSomTeclas;
+      beep(1568, 60);                        // so soa quando liga
+    }
+    esperaSoltar();
+  }
+}
+
+// ============================================================
+//  DESCANSO (protecao de tela)
+//  Depois de X segundos sem apertar nada, o Purin dorme com a
+//  tela fraquinha (poupa o OLED). Qualquer botao acorda.
+// ============================================================
+void entrarDescanso() {
+  descansando = true;
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(8);                // brilho bem baixo
+}
+
+void sairDescanso() {
+  descansando = false;
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(cfgContraste);     // volta ao brilho escolhido
+  ultimaAtividade = millis();
+}
+
+void telaDescanso() {
+  unsigned long t = millis();
+  atualizaHora();
+
+  // o desenho passeia devagar pela tela (evita "queimar" o OLED)
+  int cx = 64 + (int)(sinf(t / 4000.0f) * 14);
+  int cy = 34 + (int)(sinf(t / 5300.0f) * 5);
+  int respiracao = ((t % 3000) < 1500) ? 0 : -1;
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  desenhaPurinQuarto(cx, cy, true, false, false, respiracao);
+
+  // Z's subindo
+  int ciclo = (t / 250) % 14;
+  display.setCursor(cx + 22, cy - 14 - ciclo / 2);
+  display.print("z");
+  display.setCursor(cx + 28, cy - 20 - ciclo / 2);
+  display.print("Z");
+
+  // hora discreta embaixo (so se veio da internet)
+  if (horaSync) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%02d:%02d", hora.tm_hour, hora.tm_min);
+    display.setCursor(49 + (cx - 64) / 2, 56);
+    display.print(buf);
+  }
+
+  display.display();
+}
+
 // ---------------- SETUP / LOOP ----------------
 void setup() {
   Serial.begin(115200);
@@ -2558,6 +2708,7 @@ void setup() {
   }
 
   carregarConfiguracoes();
+  iniciaBuzzer();
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(cfgContraste);
 
@@ -2568,12 +2719,32 @@ void setup() {
   wifiIniciar();
 
   sequenciaBoot();
+  ultimaAtividade = millis();
 }
 
 void loop() {
   wifiAtualiza();
   atualizaPet();
   atualizaHorarioPet();
+
+    // ---- protecao de tela (descanso) ----
+  if (algumBotao()) {
+    if (descansando) {            // o primeiro toque so acorda
+      sairDescanso();
+      esperaSoltar();
+      return;
+    }
+    ultimaAtividade = millis();
+  }
+  if (!descansando && cfgTempoDescanso > 0 &&
+      millis() - ultimaAtividade > (unsigned long)cfgTempoDescanso * 1000UL) {
+    entrarDescanso();
+  }
+  if (descansando) {
+    telaDescanso();
+    delay(5);
+    return;
+  }
 
   switch (telaAtual) {
     case TELA_BOAS_VINDAS: telaBoasVindas(); break;
@@ -2602,6 +2773,10 @@ void loop() {
     case TELA_CFG_TELA:
       controlarConfigTela();
       telaConfigTela();
+      break;
+    case TELA_CFG_SOM:
+      controlarConfigSom();
+      telaConfigSom();
       break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
