@@ -60,7 +60,8 @@ enum Tela {
   TELA_VELHA_JOGO,
   TELA_SUDOKU,
   TELA_MEMORIA,
-  TELA_MONITOR
+  TELA_MONITOR,
+  TELA_SURPRESA,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -1481,7 +1482,7 @@ void telaMenu() {
   // ---- entrada ----
   if (clicou(bUp,   true)) navegar(-1);
   if (clicou(bDown, true)) navegar(+1);
-  if (clicou(bOk,   false)) {
+  if (surpOkMenu()) {
     somConfirma();
     if (selecionado == 0) {            // RELOGIO / DATA
       esperaSoltar();
@@ -1576,6 +1577,7 @@ void telaMenu() {
 
   // ---- barra de posicao ----
   desenhaBarra();
+  surpCarga();
 
   display.display();
 }
@@ -6186,6 +6188,396 @@ void monTela() {
 }
 
 
+// ============================================================
+//  SURPRESA (easter egg)
+//
+//  No MENU, segure o botao OK por ~2 segundos e comeca o filminho:
+//   cena 0: ceu estrelado + texto digitando
+//   cena 1: Purin chega, estrela cadente, ele faz um desejo
+//   cena 2: Purin pulando e coracoes subindo
+//   cena 3: coracao grande batendo + estrelas girando
+//   cena 4: constelacao em forma de coracao se formando
+//   cena 5: final com confete (OK ou BACK = sair)
+//  BACK sai a qualquer momento.
+//
+//  Cole este bloco no sketch, antes de "SETUP / LOOP".
+//  Depende de (voce ja tem): ceuEstrelado, brilhinho, brilhinhoCor,
+//  desenhaBmp7, BMP_CORACAO, desenhaConfete, desenhaPurin,
+//  textoCentralizado, memTomLiga, memTomDesliga, somVoltar,
+//  esperaSoltar, NOME, bOk, bBack, ultimaAtividade.
+// ============================================================
+
+// ---------------- PERSONALIZE ----------------
+#define SURP_HOLD_MS 2000                       // quanto tempo segurar o OK
+const char* SURP_FRASE_0 = "> voce achou!!!";
+const char* SURP_FRASE_1 = "um desejo...";
+const char* SURP_FRASE_3 = "beijoes bebe";
+const char* SURP_FINAL_1 = "pra voce";         // a linha de baixo mostra o NOME
+const char* SURP_FINAL_3 = "";
+
+// duracao de cada cena (ms desde o inicio)
+#define SURP_T1  3000UL
+#define SURP_T2  9500UL
+#define SURP_T3  15500UL
+#define SURP_T4  22000UL
+#define SURP_T5  29500UL
+
+// ---------------- estado ----------------
+unsigned long surpT0 = 0;
+int  surpSlot = -1;
+bool surpTom = false;
+bool surpOkPrev = false, surpArmado = false;
+unsigned long surpOkDesde = 0;
+
+// musica: arpejo suave (C, Am, F, G), uma nota a cada 300 ms
+const uint16_t SURP_ACORDES[4][4] = {
+  { 523, 659, 784, 1047 },
+  { 440, 523, 659, 880 },
+  { 349, 440, 523, 698 },
+  { 392, 494, 587, 784 }
+};
+const uint8_t SURP_PADRAO[8] = { 0, 1, 2, 3, 2, 1, 2, 3 };
+
+// ============================================================
+//  utilidades
+// ============================================================
+uint32_t surpHash(uint32_t a) {
+  a = (a ^ 61) ^ (a >> 16);
+  a *= 9;
+  a ^= a >> 4;
+  a *= 0x27d4eb2d;
+  a ^= a >> 15;
+  return a;
+}
+
+// coracao preenchido (cor) centrado em cx,cy; r = meia largura
+void surpCoracaoCor(int cx, int cy, int r, uint16_t cor) {
+  if (r < 2) return;
+  int rc = r / 2;
+  display.fillCircle(cx - rc, cy - rc / 2, rc, cor);
+  display.fillCircle(cx + rc, cy - rc / 2, rc, cor);
+  display.fillTriangle(cx - 2 * rc, cy - rc / 2 + 1,
+                       cx + 2 * rc, cy - rc / 2 + 1,
+                       cx, cy + 2 * rc, cor);
+}
+
+// coracao so com contorno
+void surpCoracaoContorno(int cx, int cy, int r) {
+  surpCoracaoCor(cx, cy, r, WHITE);
+  if (r > 6) surpCoracaoCor(cx, cy + 1, r - 3, BLACK);
+}
+
+// batida dupla (0 a 4 pixels)
+int surpBatida(unsigned long tt) {
+  float ph = (tt % 900) / 900.0f;
+  if (ph < 0.12f) return (int)(ph / 0.12f * 4);
+  if (ph < 0.24f) return (int)((1 - (ph - 0.12f) / 0.12f) * 4);
+  if (ph < 0.36f) return (int)((ph - 0.24f) / 0.12f * 3);
+  if (ph < 0.48f) return (int)((1 - (ph - 0.36f) / 0.12f) * 3);
+  return 0;
+}
+
+// texto aparecendo letra por letra
+void surpDigita(const char* m, int x, int y, unsigned long tt, int msPorLetra) {
+  int len = (int)strlen(m);
+  int n = (int)(tt / msPorLetra);
+  if (n > len) n = len;
+  if (n > 30) n = 30;
+  char b[32];
+  memcpy(b, m, n);
+  b[n] = 0;
+  display.setCursor(x, y);
+  display.print(b);
+}
+
+// coracoes e estrelinhas subindo (tt = ms desde o inicio da cena)
+void surpCoracoesSobem(unsigned long tt, int n, int xMin, int xMax) {
+  const int ciclo = 72;
+  for (int i = 0; i < n; i++) {
+    uint32_t h = surpHash(i + 7);
+    int x0 = xMin + (int)(h % (uint32_t)(xMax - xMin));
+    int off = (int)((h >> 8) % ciclo);
+    int y = 66 - (int)(((tt * 24UL) / 1000UL + off) % ciclo);
+    int x = x0 + (int)(sinf(tt / 500.0f + i) * 4);
+    if (y < 4 || y > 62) continue;
+    if (i % 3 == 0) brilhinho(x, y, 2);
+    else            desenhaBmp7(x, y, BMP_CORACAO, 6, 1);
+  }
+}
+
+// ============================================================
+//  som (sem travar o filme)
+// ============================================================
+void surpSom(unsigned long t) {
+  if (t < 800 || t > 40000) {
+    if (surpTom) { memTomDesliga(); surpTom = false; }
+    return;
+  }
+  unsigned long tt = t - 800;
+  int slot = (int)(tt / 300);
+  if (slot != surpSlot) {
+    surpSlot = slot;
+    int acorde = (slot / 8) % 4;
+    int f = SURP_ACORDES[acorde][SURP_PADRAO[slot % 8]];
+    memTomLiga(f);
+    surpTom = true;
+  }
+  if (surpTom && (tt % 300) > 220) {
+    memTomDesliga();
+    surpTom = false;
+  }
+}
+
+// ============================================================
+//  cenas
+// ============================================================
+void surpCena0(unsigned long t) {
+  int n = (int)(t / 90);
+  if (n > 30) n = 30;
+  ceuEstrelado(0, 0, 127, 63, n, 90);
+  int x = (SCREEN_W - (int)strlen(SURP_FRASE_0) * 6) / 2;
+  surpDigita(SURP_FRASE_0, x, 28, t, 110);
+}
+
+void surpCena1(unsigned long t) {
+  long u = (long)(t - SURP_T1);
+  ceuEstrelado(0, 0, 127, 63, 30, 90);
+  display.drawFastHLine(0, 58, SCREEN_W, WHITE);
+
+  // Purin chega pulinhando e para
+  int cx = 40, pulo = 0, amassa = 0;
+  if (u < 2200) {
+    cx = -16 + (int)(56L * u / 2200);
+    pulo = (int)(fabsf(sinf(u / 160.0f)) * 3);
+  }
+
+  // estrela cadente
+  if (u >= 2600 && u < 4400) {
+    float p = (u - 2600) / 1800.0f;
+    int hx = 124 - (int)(p * 104);
+    int hy = 3 + (int)(p * 26);
+    display.drawLine(hx, hy, hx + 18, hy - 8, WHITE);
+    display.drawLine(hx + 4, hy + 1, hx + 12, hy - 3, WHITE);
+    brilhinho(hx, hy, ((u / 90) % 2) ? 2 : 1);
+  } else if (u >= 4400 && u < 5100) {      // explosaozinha de brilho
+    int rr = (int)((u - 4400) / 60);
+    for (int k = 0; k < 6; k++) {
+      float a = k * 60 * DEG_TO_RAD;
+      display.drawPixel(20 + (int)roundf(cosf(a) * rr), 29 + (int)roundf(sinf(a) * rr), WHITE);
+    }
+    brilhinho(20, 29, 2);
+  }
+
+  // depois do desejo ele pula de alegria e sai um coracao a cada pulo
+  if (u >= 5000) {
+    long v = u - 5000;
+    float ph = (v % 900) / 900.0f;
+    pulo = (int)(4 * ph * (1 - ph) * 12);
+    if (ph < 0.08f || ph > 0.95f) amassa = 2;
+    int hx = 40 + (((v / 900) % 2) ? 8 : -8);
+    int hy = 18 - (int)(ph * 12);
+    if (ph < 0.9f && hy > 2) desenhaBmp7(hx, hy, BMP_CORACAO, 6, 1);
+  }
+  desenhaPurin(cx, 56, pulo, amassa);
+
+  if (u > 4600) {
+    int x = (SCREEN_W - (int)strlen(SURP_FRASE_1) * 6) / 2;
+    surpDigita(SURP_FRASE_1, x, 2, (unsigned long)(u - 4600), 110);
+  }
+}
+
+void surpCena2(unsigned long t) {
+  unsigned long tt = t - SURP_T2;
+  ceuEstrelado(0, 0, 127, 63, 30, 90);
+  display.drawFastHLine(0, 58, SCREEN_W, WHITE);
+
+  int n = 2 + (int)(tt / 400);
+  if (n > 14) n = 14;
+  surpCoracoesSobem(tt, n, 6, 122);
+
+  float ph = (tt % 800) / 800.0f;
+  int pulo = (int)(4 * ph * (1 - ph) * 10);
+  int amassa = (ph < 0.1f) ? 2 : 0;
+  desenhaPurin(64, 56, pulo, amassa);
+}
+
+void surpCena3(unsigned long t) {
+  unsigned long tt = t - SURP_T3;
+  ceuEstrelado(0, 0, 127, 63, 30, 90);
+
+  float grow = tt / 1200.0f;
+  if (grow > 1.0f) grow = 1.0f;
+  int r = (int)((13 + surpBatida(tt)) * grow);
+  surpCoracaoContorno(64, 28, r);
+  if (r > 10) surpCoracaoCor(64, 29, r - 8, WHITE);
+
+  // estrelas girando em volta
+  for (int k = 0; k < 8; k++) {
+    float a = tt / 1500.0f + k * PI / 4.0f;
+    int x = 64 + (int)roundf(cosf(a) * 44);
+    int y = 30 + (int)roundf(sinf(a) * 24);
+    if (k % 2 == 0) brilhinho(x, y, 2);
+    else            brilhinho(x, y, 1);
+  }
+
+  if (tt > 1500) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "pra voce, %.7s", NOME);
+    textoCentralizado(buf, 54);
+  }
+}
+
+void surpCena4(unsigned long t) {
+  unsigned long tt = t - SURP_T4;
+  ceuEstrelado(0, 0, 127, 63, 30, 90);
+
+  const int N = 18;
+  int px[N], py[N];
+  for (int i = 0; i < N; i++) {                 // curva do coracao
+    float s = PI + i * 2.0f * PI / N;
+    float sn = sinf(s);
+    float hx = 16.0f * sn * sn * sn;
+    float hy = 13.0f * cosf(s) - 5.0f * cosf(2 * s) - 2.0f * cosf(3 * s) - cosf(4 * s);
+    px[i] = 64 + (int)roundf(hx * 1.35f);
+    py[i] = 28 - (int)roundf(hy * 1.35f);
+  }
+
+  int vis = (int)(tt / 260);
+  if (vis > N) vis = N;
+  for (int i = 1; i < vis; i++) display.drawLine(px[i - 1], py[i - 1], px[i], py[i], WHITE);
+  if (vis >= N) display.drawLine(px[N - 1], py[N - 1], px[0], py[0], WHITE);
+
+  for (int i = 0; i < vis; i++) {
+    bool destaque = (vis < N) ? (i == vis - 1) : ((tt / 200 + i) % 3 == 0);
+    brilhinho(px[i], py[i], destaque ? 2 : 1);
+  }
+
+  if (vis >= N) surpCoracaoCor(64, 26, 5 + surpBatida(tt) / 2, WHITE);
+
+  if (tt > 3000) textoCentralizado(SURP_FRASE_3, 55);
+}
+
+void surpCena5(unsigned long t) {
+  unsigned long tt = t - SURP_T5;
+  char buf[24];
+  ceuEstrelado(0, 0, 46, 63, 8, 4);
+  desenhaConfete(tt);
+
+  float fase = (tt % 700) / 700.0f;
+  int pulo = (int)(4 * fase * (1 - fase) * 8);
+  desenhaPurin(24, 58, pulo, 0);
+  desenhaBmp7(8,  22 - (int)((tt / 120) % 8), BMP_CORACAO, 6, 1);
+  desenhaBmp7(41, 28 - (int)((tt / 150) % 8), BMP_CORACAO, 6, 1);
+
+  display.setCursor(52, 6);
+  display.print(SURP_FINAL_1);
+  snprintf(buf, sizeof(buf), "%.12s", NOME);
+  display.setCursor(52, 16);
+  display.print(buf);
+  display.setCursor(52, 28);
+  display.print(SURP_FINAL_3);
+  if ((tt / 400) % 2 == 0) {
+    display.setCursor(52, 40);
+    display.print("<3 <3 <3");
+  }
+  if (tt > 1500 && (tt / 600) % 2 == 0) {
+    display.setCursor(52, 55);
+    display.print("BACK: sair");
+  }
+}
+
+void surpDesenha(unsigned long t) {
+  if      (t < SURP_T1) surpCena0(t);
+  else if (t < SURP_T2) surpCena1(t);
+  else if (t < SURP_T3) surpCena2(t);
+  else if (t < SURP_T4) surpCena3(t);
+  else if (t < SURP_T5) surpCena4(t);
+  else                  surpCena5(t);
+}
+
+// ============================================================
+//  entrada / saida
+// ============================================================
+void surpComecar() {
+  surpT0 = millis();
+  surpSlot = -1;
+  surpTom = false;
+  telaAtual = TELA_SURPRESA;
+}
+
+void surpSair() {
+  memTomDesliga();
+  surpTom = false;
+  somVoltar();
+  esperaSoltar();
+  telaAtual = TELA_MENU;
+}
+
+void telaSurpresa() {
+  ultimaAtividade = millis();                   // filme rolando = acordado
+  unsigned long t = millis() - surpT0;
+  bool ok = clicou(bOk, false);
+  bool voltar = clicou(bBack, false);
+  bool fim = (t >= SURP_T5);
+
+  if ((voltar && t > 400) || (ok && fim && t > SURP_T5 + 1500)) {
+    surpSair();
+    return;
+  }
+
+  surpSom(t);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  surpDesenha(t);
+  display.display();
+}
+
+// ============================================================
+//  gatilho no MENU
+//  Use no lugar de clicou(bOk, false) no telaMenu():
+//   - toque curto: devolve true quando SOLTA o botao (age normal)
+//   - segurar SURP_HOLD_MS: abre a surpresa (devolve false)
+// ============================================================
+bool surpOkMenu() {
+  unsigned long t = millis();
+  bool baixo = !digitalRead(PIN_BTN_OK);
+  bool toque = false;
+
+  if (baixo && !surpOkPrev) { surpOkDesde = t; surpArmado = true; }
+
+  if (baixo && surpArmado && t - surpOkDesde >= SURP_HOLD_MS) {
+    surpArmado = false;
+    surpComecar();
+  }
+  if (!baixo && surpOkPrev && surpArmado) {
+    surpArmado = false;
+    toque = true;
+  }
+  surpOkPrev = baixo;
+  bOk.anterior = baixo;                         // mantem o detector de clique em dia
+  return toque;
+}
+
+// brilhinhos aparecem em volta do icone enquanto voce segura (dica discreta)
+void surpCarga() {
+  bool baixo = !digitalRead(PIN_BTN_OK);
+  if (!surpArmado || !baixo) return;
+  unsigned long d = millis() - surpOkDesde;
+  if (d < 600) return;
+  float p = (d - 600) / (float)(SURP_HOLD_MS - 600);
+  int n = (int)(p * 8) + 1;
+  if (n > 8) n = 8;
+  for (int k = 0; k < n; k++) {
+    float a = (k * 45 - 90) * DEG_TO_RAD;
+    int x = 64 + (int)roundf(cosf(a) * 30);
+    int y = 30 + (int)roundf(sinf(a) * 18);
+    brilhinho(x, y, (k % 2) ? 1 : 2);
+  }
+}
+
+
+
 // ---------------- SETUP / LOOP ----------------
 void setup() {
   Serial.begin(115200);
@@ -6285,6 +6677,7 @@ void loop() {
     case TELA_SUDOKU: sudTela(); break;
     case TELA_MEMORIA: memTela(); break;
     case TELA_MONITOR: monTela(); break;
+    case TELA_SURPRESA: telaSurpresa(); break;
 
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
