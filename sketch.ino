@@ -62,6 +62,7 @@ enum Tela {
   TELA_MEMORIA,
   TELA_MONITOR,
   TELA_SURPRESA,
+  TELA_ENCONTRO,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -2368,20 +2369,20 @@ void telaBoasVindas() {
   else if (fase < 0.88)  { amassa = 2; }
   desenhaPurin(64, 52, pulo, amassa);
 
-  // convite piscando
+   // convite piscando
   if ((t / 700) % 2 == 0) {
     display.setCursor(7, 56);
     display.print("[ aperte um botao ]");
   }
+  encCarga();            // <<< NOVO: brilhinhos enquanto segura o BACK
   display.display();
 
-  if (algumBotao()) {
+  if (encEntrada()) {    // <<< TROCOU: era algumBotao()
     somConfirma();
     esperaSoltar();
     telaAtual = TELA_MENU;
   }
 }
-
 // -- CONFIGURACOES --
 
 void telaConfiguracoes() {
@@ -6576,6 +6577,558 @@ void surpCarga() {
   }
 }
 
+// ============================================================
+//  CENA DO ENCONTRO (easter egg da tela inicial)
+//
+//  Na TELA INICIAL (boas-vindas), segure BACK por ~2 segundos.
+//  Toque curto no BACK (ou qualquer outro botao) entra no menu, como antes.
+//
+//  Roteiro (~26 s):
+//   0  titulo digitando ("como tudo comecou...") + cortina
+//   1  biblioteca, secao de poesia brasileira: ele agachado, de costas
+//      pra estante, lendo (de frente pra gente)
+//   2  ela chega pela DIREITA DELE (= esquerda da tela), ele percebe
+//   3  faixa de legenda: a pergunta dela
+//   4  faixa de legenda: a resposta dele (texto que voce escreve)
+//   5  coracao sobe, a camera AFASTA, vira ceu estrelado, o Purin cai
+//      e a tela inicial assume sem corte
+//  BACK pula a cena a qualquer momento.
+//
+//  Cole este bloco no sketch, antes de "SETUP / LOOP".
+//  Depende de (voce ja tem): desenhaEstrelas, desenhaPurin, brilhinho,
+//  ceuEstrelado, desenhaBmp7, BMP_CORACAO, textoCentralizado,
+//  memTomLiga, memTomDesliga, somVoltar, esperaSoltar, NOME,
+//  bBack, ultimaAtividade, clicou.
+// ============================================================
+
+// ---------------- PERSONALIZE ----------------
+#define ENC_HOLD_MS 2000                         // quanto tempo segurar o BACK
+const char* ENC_PLACA  = "POESIA BRASILEIRA";    // placa da estante
+const char* ENC_TIT_1  = "como tudo";
+const char* ENC_TIT_2  = "comecou...";
+const char* ENC_ELA_L1 = "voce gosta de";        // fala dela (2 linhas, ate 21 letras cada)
+const char* ENC_ELA_L2 = "poesia brasileira?";
+const char* ENC_ELE_L1 = "(sua fala";            // <<< ESCREVA A SUA RESPOSTA AQUI
+const char* ENC_ELE_L2 = "vai aqui)";            // (sem acentos: a fonte do OLED nao tem)
+
+// posicoes na tela
+#define ENC_ELE_X      86      // ele (agachado)
+#define ENC_ELA_X_FIM  40      // onde ela para
+
+// linha do tempo (ms desde o inicio)
+#define ENC_T_TITULO_FIM 2600UL
+#define ENC_T_REVELA_FIM 3200UL
+#define ENC_T_ENTRA      7200UL      // ela comeca a andar
+#define ENC_T_PARA       10200UL     // ela para
+#define ENC_T_PERGUNTA   10600UL     // faixa da pergunta
+#define ENC_T_RESPOSTA   15000UL     // faixa da resposta
+#define ENC_T_FALAS_FIM  19500UL     // faixa recolhe
+#define ENC_T_ZOOM       20600UL     // camera comeca a afastar
+#define ENC_T_ESTRELA    23600UL     // a cena vira uma estrelinha
+#define ENC_T_PURIN      24000UL     // o Purin cai
+
+// ---------------- estado ----------------
+unsigned long encT0 = 0;
+int  encSlot = -1;
+bool encTom = false;
+bool encSync = false;
+bool encBackPrev = false, encArmado = false;
+unsigned long encBackDesde = 0;
+static uint8_t encCopia[1024];       // copia do quadro (pro zoom)
+
+// musica: arpejo lento (Am, F, C, G), uma nota a cada 420 ms
+const uint16_t ENC_ACORDES[4][4] = {
+  { 440, 523, 659, 880 },
+  { 349, 440, 523, 698 },
+  { 523, 659, 784, 1047 },
+  { 392, 494, 587, 784 }
+};
+const uint8_t ENC_PADRAO[8] = { 0, 1, 2, 3, 2, 1, 2, 1 };
+
+// ============================================================
+//  utilidades
+// ============================================================
+uint32_t encHash(uint32_t a) {
+  a = (a ^ 61) ^ (a >> 16);
+  a *= 9;
+  a ^= a >> 4;
+  a *= 0x27d4eb2d;
+  a ^= a >> 15;
+  return a;
+}
+
+// escreve so as primeiras n letras (efeito de digitacao)
+void encDigita(const char* m, int x, int y, int n) {
+  int len = (int)strlen(m);
+  if (n > len) n = len;
+  if (n > 30) n = 30;
+  if (n <= 0) return;
+  char b[32];
+  memcpy(b, m, n);
+  b[n] = 0;
+  display.setCursor(x, y);
+  display.print(b);
+}
+
+// ============================================================
+//  som (sem travar)
+// ============================================================
+void encSom(unsigned long t) {
+  if (t >= ENC_T_REVELA_FIM && t < ENC_T_ESTRELA) {
+    unsigned long tt = t - ENC_T_REVELA_FIM;
+    int slot = (int)(tt / 420);
+    if (slot != encSlot) {
+      encSlot = slot;
+      memTomLiga(ENC_ACORDES[(slot / 8) % 4][ENC_PADRAO[slot % 8]]);
+      encTom = true;
+    }
+    if (encTom && (tt % 420) > 300) { memTomDesliga(); encTom = false; }
+  } else if (t >= ENC_T_ESTRELA && t < ENC_T_ESTRELA + 250) {
+    if (!encTom) { memTomLiga(2093); encTom = true; }   // brilho da estrela
+  } else if (encTom) {
+    memTomDesliga();
+    encTom = false;
+  }
+}
+
+// ============================================================
+//  cenario: estante da biblioteca
+// ============================================================
+void encLivroPontilhado(int x, int y, int w, int h) {
+  for (int yy = y; yy < y + h; yy += 2) {
+    display.drawPixel(x, yy, WHITE);
+    display.drawPixel(x + w - 1, yy, WHITE);
+  }
+  for (int xx = x; xx < x + w; xx += 2) display.drawPixel(xx, y, WHITE);
+}
+
+// fileira de livros apoiada em "base"
+void encLivros(int base, int altMin, int altVar, uint32_t sem, bool solido) {
+  int x = 1, i = 0;
+  while (x < 126) {
+    uint32_t h = encHash(sem + i++);
+    int w = 3 + (int)(h % 3);
+    int alt = altMin + (int)((h >> 4) % (uint32_t)(altVar + 1));
+    if (x + w > 127) break;
+    if ((h >> 9) % 6 == 0) { x += 2; continue; }          // vaozinho
+    if (solido) {
+      display.drawRect(x, base - alt, w, alt, WHITE);
+      if ((h >> 12) % 2) display.drawFastHLine(x, base - alt + 3, w, WHITE);
+    } else {
+      encLivroPontilhado(x, base - alt, w, alt);          // fundo "apagadinho"
+    }
+    x += w;
+  }
+}
+
+void encFundo() {
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);            // placa da secao
+  display.setTextSize(1);
+  display.setTextColor(BLACK);
+  textoCentralizado(ENC_PLACA, 1);
+  display.setTextColor(WHITE);
+
+  encLivros(24, 9, 3, 11, true);
+  display.drawFastHLine(0, 24, SCREEN_W, WHITE);
+  encLivros(41, 12, 3, 23, false);
+  for (int x = 0; x < SCREEN_W; x += 2) display.drawPixel(x, 41, WHITE);
+  encLivros(58, 13, 3, 37, false);
+  display.drawFastHLine(0, 58, SCREEN_W, WHITE);          // chao
+}
+
+// ============================================================
+//  personagens
+// ============================================================
+void encBoca(int cx, int y, bool falando, bool sorri, unsigned long t) {
+  if (falando && (t / 130) % 2 == 0) {
+    display.drawFastHLine(cx - 1, y - 1, 3, WHITE);
+    display.drawPixel(cx, y, WHITE);
+  } else if (sorri) {
+    display.drawPixel(cx - 2, y - 1, WHITE);
+    display.drawFastHLine(cx - 1, y, 3, WHITE);
+    display.drawPixel(cx + 2, y - 1, WHITE);
+  } else {
+    display.drawFastHLine(cx - 1, y, 3, WHITE);
+  }
+}
+
+// ELE: agachado de costas pra estante (de frente pra gente), lendo
+// olhar: 0 = lendo (olhos pra baixo) | -1 = olhando pra ela (esquerda da tela)
+void encEle(int cx, unsigned long t, int olhar, bool falando, bool sorri) {
+  int resp = ((t % 2400) < 1200) ? 0 : 1;
+  int cy = 36 - resp;
+
+  // joelhos, canelas e pes
+  for (int s = -1; s <= 1; s += 2) {
+    int kx = cx + s * 8;
+    display.fillCircle(kx, 50, 3, BLACK);
+    display.drawCircle(kx, 50, 3, WHITE);
+    display.drawRect(kx - 2, 53, 4, 3, WHITE);
+    display.fillRect(kx - 3, 56, 6, 2, WHITE);
+  }
+
+  // tronco
+  display.fillRoundRect(cx - 6, 41, 12, 8, 3, BLACK);
+  display.drawRoundRect(cx - 6, 41, 12, 8, 3, WHITE);
+
+  // livro aberto
+  display.fillRect(cx - 6, 45, 13, 7, BLACK);
+  display.drawRect(cx - 6, 45, 7, 7, WHITE);
+  display.drawRect(cx, 45, 7, 7, WHITE);
+  display.drawFastHLine(cx - 5, 47, 4, WHITE);
+  display.drawFastHLine(cx - 5, 49, 4, WHITE);
+  display.drawFastHLine(cx + 2, 47, 4, WHITE);
+  display.drawFastHLine(cx + 2, 49, 3, WHITE);
+  if (olhar == 0) {                                        // vira a pagina de tempos em tempos
+    unsigned long c = t % 2200;
+    if (c < 350) {
+      float p = c / 350.0f;
+      int tx = cx + (int)roundf(6.0f * cosf(p * PI));
+      int ty = 45 - (int)roundf(2.0f * sinf(p * PI));
+      display.drawLine(cx, 51, tx, ty, WHITE);
+    }
+  }
+
+  // bracos
+  display.drawLine(cx - 6, 42, cx - 7, 47, WHITE);
+  display.drawLine(cx + 6, 42, cx + 7, 47, WHITE);
+
+  // cabeca com cabelo curto
+  display.fillCircle(cx, cy, 6, BLACK);
+  display.drawCircle(cx, cy, 5, WHITE);
+  for (int dy = -5; dy <= -2; dy++) {
+    int w = (int)sqrtf(25.5f - dy * dy);
+    display.drawFastHLine(cx - w, cy + dy, 2 * w + 1, WHITE);
+  }
+  if (olhar == 0) {
+    display.drawPixel(cx - 2, cy + 2, WHITE);
+    display.drawPixel(cx + 2, cy + 2, WHITE);
+  } else {
+    display.drawPixel(cx - 3, cy + 1, WHITE);
+    display.drawPixel(cx + 1, cy + 1, WHITE);
+  }
+  encBoca(cx, cy + 4, falando, sorri, t);
+}
+
+// ELA: cabelo cacheado, oculos redondo, vestidinho
+void encEla(int cx, unsigned long t, bool andando, bool falando, bool sorri) {
+  float ph = t / 120.0f;
+  int bob = andando ? (int)(fabsf(sinf(ph)) * 1.5f) : (((t % 2400) < 1200) ? 0 : 1);
+  int step = andando ? (int)roundf(sinf(ph) * 3.0f) : 0;
+  int cy = 30 - bob;
+  int topo = 36 - bob;
+
+  // pernas
+  display.drawLine(cx - 3, 49, cx - 3 + step, 56, WHITE);
+  display.drawLine(cx + 3, 49, cx + 3 - step, 56, WHITE);
+  display.drawFastHLine(cx - 4 + step, 57, 3, WHITE);
+  display.drawFastHLine(cx + 2 - step, 57, 3, WHITE);
+
+  // vestido
+  display.fillTriangle(cx - 4, topo, cx + 4, topo, cx + 8, 49, BLACK);
+  display.fillTriangle(cx - 4, topo, cx + 8, 49, cx - 8, 49, BLACK);
+  display.drawLine(cx - 4, topo, cx - 8, 49, WHITE);
+  display.drawLine(cx + 4, topo, cx + 8, 49, WHITE);
+  display.drawFastHLine(cx - 8, 49, 17, WHITE);
+  display.drawFastHLine(cx - 4, 41, 9, WHITE);
+
+  // bracos
+  display.drawLine(cx - 4, topo + 1, cx - 7 - step / 2, 45, WHITE);
+  display.drawLine(cx + 4, topo + 1, cx + 7 + step / 2, 45, WHITE);
+
+  // cachos (em volta da cabeca e caindo dos lados)
+  for (int a = -200; a <= 20; a += 30) {
+    float r = a * DEG_TO_RAD;
+    int x = cx + (int)roundf(cosf(r) * 6.0f);
+    int y = cy + (int)roundf(sinf(r) * 6.0f);
+    display.fillCircle(x, y, 3, BLACK);
+    display.drawCircle(x, y, 3, WHITE);
+  }
+  for (int s = -1; s <= 1; s += 2) {
+    for (int k = 0; k < 2; k++) {
+      int x = cx + s * 8, y = cy + 6 + k * 4;
+      display.fillCircle(x, y, 2, BLACK);
+      display.drawCircle(x, y, 2, WHITE);
+    }
+  }
+
+  // rosto
+  display.fillCircle(cx, cy, 5, BLACK);
+  display.drawCircle(cx, cy, 5, WHITE);
+
+  // oculos redondo
+  display.drawCircle(cx - 3, cy, 2, WHITE);
+  display.drawCircle(cx + 3, cy, 2, WHITE);
+  display.drawPixel(cx, cy, WHITE);
+  display.drawPixel(cx - 3, cy, WHITE);
+  display.drawPixel(cx + 3, cy, WHITE);
+
+  encBoca(cx, cy + 3, falando, sorri, t);
+}
+
+// ============================================================
+//  faixa de legenda (fala)
+// ============================================================
+void encFaixa(unsigned long t) {
+  int h = 0;
+  if (t >= ENC_T_PERGUNTA && t < ENC_T_FALAS_FIM) {
+    unsigned long d = t - ENC_T_PERGUNTA;
+    h = (d < 250) ? (int)(21 * d / 250) : 21;
+  } else if (t >= ENC_T_FALAS_FIM && t < ENC_T_FALAS_FIM + 300) {
+    h = 21 - (int)(21 * (t - ENC_T_FALAS_FIM) / 300);
+  }
+  if (h <= 0) return;
+
+  display.fillRect(0, 0, SCREEN_W, h, BLACK);
+  display.drawFastHLine(0, h - 1, SCREEN_W, WHITE);
+  if (h < 21) return;
+
+  bool ela = (t < ENC_T_RESPOSTA);
+  const char* l1 = ela ? ENC_ELA_L1 : ENC_ELE_L1;
+  const char* l2 = ela ? ENC_ELA_L2 : ENC_ELE_L2;
+  unsigned long ini = (ela ? ENC_T_PERGUNTA : ENC_T_RESPOSTA) + 400;
+  int typed = (t > ini) ? (int)((t - ini) / 65) : 0;
+  int n1 = (int)strlen(l1), n2 = (int)strlen(l2);
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  encDigita(l1, (SCREEN_W - n1 * 6) / 2, 2, typed);
+  if (typed > n1) encDigita(l2, (SCREEN_W - n2 * 6) / 2, 11, typed - n1);
+
+  int sx = ela ? ENC_ELA_X_FIM : ENC_ELE_X;               // pontinha apontando pra quem fala
+  display.fillTriangle(sx - 3, h - 1, sx + 3, h - 1, sx, h + 3, WHITE);
+}
+
+// ============================================================
+//  cenas
+// ============================================================
+void encTitulo(unsigned long t) {
+  ceuEstrelado(0, 0, 127, 63, 10, 95);
+  int n = (int)(t / 100);
+  int n1 = (int)strlen(ENC_TIT_1), n2 = (int)strlen(ENC_TIT_2);
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  encDigita(ENC_TIT_1, (SCREEN_W - n1 * 6) / 2, 22, n);
+  if (n > n1) encDigita(ENC_TIT_2, (SCREEN_W - n2 * 6) / 2, 34, n - n1);
+}
+
+void encCena(unsigned long t) {
+  encFundo();
+
+  // ele
+  int olhar = (t >= 9300) ? -1 : 0;
+  int nEla = (int)(strlen(ENC_ELA_L1) + strlen(ENC_ELA_L2));
+  int nEle = (int)(strlen(ENC_ELE_L1) + strlen(ENC_ELE_L2));
+  bool elaFala = (t >= ENC_T_PERGUNTA + 400 && t < ENC_T_PERGUNTA + 400 + (unsigned long)nEla * 65);
+  bool eleFala = (t >= ENC_T_RESPOSTA + 400 && t < ENC_T_RESPOSTA + 400 + (unsigned long)nEle * 65);
+  bool eleSorri = (t >= ENC_T_RESPOSTA + 400);
+  bool elaSorri = (t >= ENC_T_RESPOSTA + 1500);
+  encEle(ENC_ELE_X, t, olhar, eleFala, eleSorri);
+
+  // ela (entra pela esquerda da tela = direita dele)
+  int elaX = -20;
+  bool andando = false;
+  if (t >= ENC_T_ENTRA && t < ENC_T_PARA) {
+    elaX = -14 + (int)((long)(ENC_ELA_X_FIM + 14) * (long)(t - ENC_T_ENTRA) / (long)(ENC_T_PARA - ENC_T_ENTRA));
+    andando = true;
+  } else if (t >= ENC_T_PARA) {
+    elaX = ENC_ELA_X_FIM;
+  }
+  if (elaX > -16) encEla(elaX, t, andando, elaFala, elaSorri);
+
+  // "!" quando ele percebe
+  if (t >= 9300 && t < 10300) {
+    display.setTextSize(1);
+    display.setCursor(ENC_ELE_X - 2, 21);
+    display.print("!");
+  }
+
+  // brilhinhos entre os dois
+  if (t >= 18000) {
+    brilhinho(63, 38, ((t / 200) % 2) ? 2 : 1);
+    brilhinho(58, 47, ((t / 260) % 2) ? 1 : 2);
+  }
+
+  // coracao subindo
+  if (t >= ENC_T_FALAS_FIM + 200) {
+    unsigned long uu = t - (ENC_T_FALAS_FIM + 200);
+    int hx = 63 + (int)(sinf(uu / 400.0f) * 5.0f);
+    int hy = 44 - (int)(uu / 40);
+    if (hy > 12) desenhaBmp7(hx, hy, BMP_CORACAO, 6, 1);
+  }
+
+  encFaixa(t);
+}
+
+// a camera afasta: a cena encolhe no meio de um ceu estrelado
+void encZoom(unsigned long t) {
+  display.clearDisplay();
+  encCena(t);
+  memcpy(encCopia, display.getBuffer(), 1024);
+
+  float u = (t - ENC_T_ZOOM) / (float)(ENC_T_ESTRELA - ENC_T_ZOOM);
+  if (u > 1.0f) u = 1.0f;
+  float e = u * u * (3.0f - 2.0f * u);
+  float s = 1.0f - 0.92f * e;
+  int w = (int)(SCREEN_W * s);
+  int h = (int)(SCREEN_H * s);
+  if (w < 4) w = 4;
+  if (h < 2) h = 2;
+  int x0 = 64 - w / 2, y0 = 32 - h / 2;
+
+  display.clearDisplay();
+  desenhaEstrelas();
+  display.fillRect(x0, y0, w, h, BLACK);
+  for (int dy = 0; dy < h; dy++) {
+    int sy = dy * SCREEN_H / h;
+    for (int dx = 0; dx < w; dx++) {
+      int sx = dx * SCREEN_W / w;
+      if ((encCopia[sx + (sy >> 3) * SCREEN_W] >> (sy & 7)) & 1) display.drawPixel(x0 + dx, y0 + dy, WHITE);
+    }
+  }
+  display.drawRect(x0 - 1, y0 - 1, w + 2, h + 2, WHITE);
+}
+
+// estrelinha + Purin caindo; termina IGUAL a tela inicial (sem corte)
+void encFinal(unsigned long t) {
+  unsigned long m = millis();
+  display.clearDisplay();
+  desenhaEstrelas();
+
+  display.setCursor(0, 0);
+  display.print("> ola, ");
+  display.print(NOME);
+  if ((m / 500) % 2 == 0) display.print("_");
+
+  if (t < ENC_T_PURIN) {                                   // a cena virou uma estrela
+    float u = (t - ENC_T_ESTRELA) / (float)(ENC_T_PURIN - ENC_T_ESTRELA);
+    brilhinho(64, 30, 1 + (int)(3.0f * sinf(u * PI)));
+    return;
+  }
+
+  float d = (t - ENC_T_PURIN) / 700.0f;
+  if (d < 1.0f) {                                          // Purin cai do alto
+    desenhaPurin(64, 8 + (int)(44.0f * d * d), 0, 0);
+    return;
+  }
+
+  // pousou: espera o ciclo do pulinho da tela inicial recomecar e entrega a tela pra ela
+  float fase = (m % 1100) / 1100.0f;
+  if (fase < 0.03f) encSync = true;
+  int pulo = 0, amassa = 0;
+  if (encSync) {
+    if (fase < 0.15f)      { amassa = 3; }
+    else if (fase < 0.75f) { float u = (fase - 0.15f) / 0.60f; pulo = (int)(4 * u * (1 - u) * 10); }
+    else if (fase < 0.88f) { amassa = 2; }
+  }
+  desenhaPurin(64, 52, pulo, amassa);
+  if ((m / 700) % 2 == 0) {
+    display.setCursor(7, 56);
+    display.print("[ aperte um botao ]");
+  }
+}
+
+// ============================================================
+//  entrada / saida
+// ============================================================
+void encComecar() {
+  encT0 = millis();
+  encSlot = -1;
+  encTom = false;
+  encSync = false;
+  telaAtual = TELA_ENCONTRO;
+}
+
+void encSair() {                                           // BACK: pula a cena
+  memTomDesliga();
+  encTom = false;
+  somVoltar();
+  esperaSoltar();
+  telaAtual = TELA_BOAS_VINDAS;
+}
+
+void telaEncontro() {
+  ultimaAtividade = millis();                              // filme rolando = acordado
+  unsigned long t = millis() - encT0;
+  bool voltar = clicou(bBack, false);
+  if (voltar && t > 500) { encSair(); return; }
+
+  encSom(t);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  if (t < ENC_T_TITULO_FIM) {
+    encTitulo(t);
+  } else if (t < ENC_T_ZOOM) {
+    encCena(t);
+    if (t < ENC_T_REVELA_FIM) {                            // cortina revelando a cena
+      int rx = (int)(SCREEN_W * (t - ENC_T_TITULO_FIM) / (ENC_T_REVELA_FIM - ENC_T_TITULO_FIM));
+      display.fillRect(rx, 0, SCREEN_W - rx, SCREEN_H, BLACK);
+      display.drawFastVLine(rx, 0, SCREEN_H, WHITE);
+    }
+  } else if (t < ENC_T_ESTRELA) {
+    encZoom(t);
+  } else {
+    encFinal(t);
+  }
+  display.display();
+
+  if (encSync) {                                           // passou o bastao pra tela inicial
+    memTomDesliga();
+    encTom = false;
+    telaAtual = TELA_BOAS_VINDAS;
+  }
+}
+
+// ============================================================
+//  gatilho na TELA INICIAL
+//  Use no lugar de algumBotao() no telaBoasVindas():
+//   - CIMA / BAIXO / OK: entram no menu na hora (como antes)
+//   - BACK curto: entra no menu quando SOLTA
+//   - BACK segurado ENC_HOLD_MS: abre a cena (devolve false)
+// ============================================================
+bool encEntrada() {
+  unsigned long t = millis();
+  bool back  = !digitalRead(PIN_BTN_BACK);
+  bool outro = !digitalRead(PIN_BTN_UP) || !digitalRead(PIN_BTN_DOWN) || !digitalRead(PIN_BTN_OK);
+  bool vaiMenu = false;
+
+  if (outro) {
+    encArmado = false;
+    vaiMenu = true;
+  } else {
+    if (back && !encBackPrev) { encBackDesde = t; encArmado = true; }
+    if (back && encArmado && t - encBackDesde >= ENC_HOLD_MS) {
+      encArmado = false;
+      encComecar();
+    }
+    if (!back && encBackPrev && encArmado) {
+      encArmado = false;
+      vaiMenu = true;
+    }
+  }
+  encBackPrev = back;
+  bBack.anterior = back;                                   // mantem o detector de clique em dia
+  return vaiMenu;
+}
+
+// brilhinhos em volta do Purin enquanto voce segura (dica discreta)
+void encCarga() {
+  bool back = !digitalRead(PIN_BTN_BACK);
+  if (!encArmado || !back) return;
+  unsigned long d = millis() - encBackDesde;
+  if (d < 600) return;
+  float p = (d - 600) / (float)(ENC_HOLD_MS - 600);
+  int n = (int)(p * 6) + 1;
+  if (n > 6) n = 6;
+  for (int k = 0; k < n; k++) {
+    float a = (k * 60 - 90) * DEG_TO_RAD;
+    int x = 64 + (int)roundf(cosf(a) * 34.0f);
+    int y = 36 + (int)roundf(sinf(a) * 16.0f);
+    brilhinho(x, y, (k % 2) ? 1 : 2);
+  }
+}
 
 
 // ---------------- SETUP / LOOP ----------------
@@ -6678,6 +7231,7 @@ void loop() {
     case TELA_MEMORIA: memTela(); break;
     case TELA_MONITOR: monTela(); break;
     case TELA_SURPRESA: telaSurpresa(); break;
+    case TELA_ENCONTRO: telaEncontro(); break;
 
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
