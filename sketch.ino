@@ -60,6 +60,7 @@ enum Tela {
   TELA_VELHA_JOGO,
   TELA_SUDOKU,
   TELA_MEMORIA,
+  TELA_MONITOR
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -1515,6 +1516,11 @@ void telaMenu() {
     if (selecionado == 3) {            // MINI JOGOS
       esperaSoltar();
       abrirMenuJogos();
+      return;
+    }
+    if (selecionado == 2) {            // MONITOR SISTEMA
+      esperaSoltar();
+      monAbrir();
       return;
     }
     avisoAte = millis() + 1200;        // os outros modulos ainda nao existem
@@ -5607,6 +5613,577 @@ void memTela() {
   display.display();
 }
 
+// ============================================================
+//  MONITOR DO SISTEMA  (6 paginas)
+//
+//  0 memoria | 1 wi-fi | 2 sistema | 3 osciloscopio | 4 recordes | 5 sobre
+//
+//  CIMA/BAIXO = trocar de pagina | BACK = voltar ao menu
+//  OK: na pagina Wi-Fi reconecta | na pagina Sobre revela o segredo
+//      | nas outras passa pra proxima pagina
+//
+//  O Purin mini do cabecalho reage ao estado do sistema:
+//  preocupado (RAM baixa, chip quente, Wi-Fi caido, bateria fraca),
+//  feliz (acabou de reconectar) ou normal.
+//
+//  Cole este bloco no sketch, antes de "SETUP / LOOP".
+//  Depende de (voce ja tem): ceuEstrelado, brilhinho, brilhinhoCor,
+//  desenhaBmp7, BMP_CORACAO, desenhaPurin, carregarRecordes,
+//  recordes, NOMES_JOGOS, NOME, WIFI_SSID, WIFI_SENHA, DUR_WIPE.
+// ============================================================
+
+// ---------------- PERSONALIZE ----------------
+#define MON_VERSAO   "v1.0"
+const char* MON_SEGREDO1 = "feito so pra voce";
+const char* MON_SEGREDO2 = "com muito carinho <3";
+
+// ---------------- BATERIA (opcional) ----------------
+// Deixe -1 enquanto nao tiver bateria (a pagina Sistema mostra "USB").
+// Quando ligar uma bateria LiPo, faca um divisor de tensao com 2 resistores
+// iguais (ex: 100k + 100k): BAT+ -> 100k -> PINO -> 100k -> GND,
+// e coloque aqui o numero do pino. Use so pinos ADC1 (34, 35, 36 ou 39):
+// os ADC2 nao funcionam junto com o Wi-Fi.
+#define MON_BAT_PIN  -1
+#define MON_BAT_DIV  2.0f          // 2 resistores iguais dividem por 2
+
+#define MON_N_PAGS      6
+#define MON_HIST        120        // amostras guardadas
+#define MON_INTERVALO   500        // ms entre amostras (120 x 0,5 s = 1 minuto)
+
+int monPag = 0;
+unsigned long monTPag = 0;
+
+// historico (buffer circular). Roda em todas as telas, entao o grafico
+// ja chega cheio quando voce abre o monitor.
+int32_t monHistRam[MON_HIST];      // RAM livre em bytes
+int32_t monHistWifi[MON_HIST];     // sinal em dBm (-100 = sem conexao)
+int monHistPos = 0, monHistCont = 0;
+unsigned long monTAmostra = 0, monTBat = 0;
+float monBatMv = 0;
+
+// reconexao Wi-Fi pelo OK: 0 nada | 1 conectando | 2 conectou | 3 falhou
+uint8_t monRecon = 0;
+unsigned long monTRecon = 0;
+
+int monRecs[4] = { 0, 0, 0, 0 };   // dino | pong | velha | memoria
+int monSudBest = 0;                // menor tempo de sudoku (s)
+bool monSegredo = false;
+
+const uint8_t MON_TROFEU[7] = { 0b1111111, 0b1011101, 0b1011101, 0b0111110, 0b0011100, 0b0001000, 0b0111110 };
+
+// ============================================================
+//  coleta de dados (chame monAmostra() a cada volta do loop)
+// ============================================================
+void monAmostra() {
+  unsigned long t = millis();
+  if (t - monTAmostra >= MON_INTERVALO) {
+    monTAmostra = t;
+    monHistRam[monHistPos]  = (int32_t)ESP.getFreeHeap();
+    monHistWifi[monHistPos] = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -100;
+    monHistPos = (monHistPos + 1) % MON_HIST;
+    if (monHistCont < MON_HIST) monHistCont++;
+  }
+#if MON_BAT_PIN >= 0
+  if (monBatMv == 0 || t - monTBat >= 2000) {
+    monTBat = t;
+    uint32_t soma = 0;
+    for (int i = 0; i < 8; i++) soma += analogReadMilliVolts(MON_BAT_PIN);
+    float mv = (soma / 8.0f) * MON_BAT_DIV;
+    monBatMv = (monBatMv == 0) ? mv : (monBatMv * 0.8f + mv * 0.2f);   // suaviza
+  }
+#endif
+}
+
+// % da bateria (curva aproximada de LiPo) ou -1 se nao houver bateria
+int monBateriaPct() {
+#if MON_BAT_PIN >= 0
+  static const int mv[9]  = { 3300, 3600, 3700, 3750, 3800, 3870, 3950, 4100, 4200 };
+  static const int pc[9]  = {    0,    5,   12,   25,   40,   60,   75,   92,  100 };
+  if (monBatMv <= mv[0]) return 0;
+  if (monBatMv >= mv[8]) return 100;
+  for (int i = 1; i < 9; i++) {
+    if (monBatMv <= mv[i]) {
+      float f = (monBatMv - mv[i - 1]) / (float)(mv[i] - mv[i - 1]);
+      return (int)(pc[i - 1] + f * (pc[i] - pc[i - 1]) + 0.5f);
+    }
+  }
+  return 100;
+#else
+  return -1;
+#endif
+}
+
+// k = 0 e a amostra mais antiga ... monHistCont-1 e a mais nova
+int32_t monAmostraAt(const int32_t* arr, int k) {
+  int idx = (monHistPos - monHistCont + k + MON_HIST * 2) % MON_HIST;
+  return arr[idx];
+}
+
+// faixa automatica do grafico de RAM (minimo de 8 KB pra nao exagerar)
+void monEscalaRam(int vis, int32_t &lo, int32_t &hi) {
+  if (monHistCont == 0) { lo = 0; hi = 1; return; }
+  if (vis > monHistCont) vis = monHistCont;
+  lo = hi = monAmostraAt(monHistRam, monHistCont - 1);
+  for (int i = 0; i < vis; i++) {
+    int32_t v = monAmostraAt(monHistRam, monHistCont - 1 - i);
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  const int32_t MIN_FAIXA = 8192;
+  if (hi - lo < MIN_FAIXA) {
+    int32_t meio = (hi + lo) / 2;
+    lo = meio - MIN_FAIXA / 2;
+    hi = meio + MIN_FAIXA / 2;
+  }
+}
+
+// moldura com grade pontilhada (estilo tela de osciloscopio)
+void monMoldura(int x, int y, int w, int h, int passo) {
+  display.drawRect(x, y, w, h, WHITE);
+  for (int gx = x + passo; gx < x + w - 1; gx += passo)
+    for (int gy = y + h / 4; gy < y + h - 1; gy += h / 4)
+      display.drawPixel(gx, gy, WHITE);
+}
+
+// curva dentro do retangulo (x,y,w,h)
+// estilo: 0 = linha | 1 = linha + area pontilhada | 2 = tracejada
+void monCurva(int x, int y, int w, int h, const int32_t* arr, int32_t lo, int32_t hi, int estilo) {
+  if (monHistCont < 2) return;
+  if (hi <= lo) hi = lo + 1;
+  int vis = (w < monHistCont) ? w : monHistCont;
+  int px = 0, py = 0;
+  for (int i = 0; i < vis; i++) {
+    int32_t v = monAmostraAt(arr, monHistCont - vis + i);
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    int yy = y + h - 1 - (int)((int64_t)(v - lo) * (h - 1) / (hi - lo));
+    int xx = x + w - vis + i;
+    if (i > 0 && (estilo != 2 || (i % 2 == 0))) display.drawLine(px, py, xx, yy, WHITE);
+    if (estilo == 1 && (i % 2 == 0)) display.drawFastVLine(xx, yy, y + h - yy, WHITE);
+    px = xx;
+    py = yy;
+  }
+}
+
+// ============================================================
+//  Purin que reage ao sistema
+// ============================================================
+// humor: 0 normal | 1 preocupado | 2 feliz
+int monHumor() {
+  uint32_t total = ESP.getHeapSize();
+  int pctLivre = (total > 0) ? (int)((uint64_t)ESP.getFreeHeap() * 100 / total) : 100;
+  float temp = temperatureRead();
+  int bat = monBateriaPct();
+  if (pctLivre < 25 || temp > 75.0f) return 1;               // pouca RAM ou muito quente
+  if (bat >= 0 && bat < 15) return 1;                        // bateria fraca
+  if (monRecon == 1 || monRecon == 3) return 1;              // reconectando / falhou
+  if (WiFi.status() != WL_CONNECTED) return 1;               // sem Wi-Fi
+  if (monRecon == 2) return 2;                               // acabou de reconectar: feliz!
+  return 0;
+}
+
+void monPurin(int x, int y, int humor, bool piscando) {
+  unsigned long t = millis();
+  display.fillRoundRect(x, y + 2, 13, 10, 3, BLACK);
+  display.drawRoundRect(x, y + 2, 13, 10, 3, WHITE);
+  display.fillRect(x + 2, y, 9, 3, WHITE);                   // boina
+
+  int tremor = (humor == 1 && (t / 150) % 2 == 0) ? 1 : 0;   // orelhas tremem de nervoso
+  display.drawFastVLine(x - 1,  y + 5 + tremor, 4, WHITE);
+  display.drawFastVLine(x + 13, y + 5 + tremor, 4, WHITE);
+
+  if (humor == 2) {                                          // feliz: olhinhos ^ ^ e sorriso
+    display.drawPixel(x + 2, y + 7, WHITE);
+    display.drawPixel(x + 3, y + 6, WHITE);
+    display.drawPixel(x + 4, y + 7, WHITE);
+    display.drawPixel(x + 8, y + 7, WHITE);
+    display.drawPixel(x + 9, y + 6, WHITE);
+    display.drawPixel(x + 10, y + 7, WHITE);
+    display.drawPixel(x + 5, y + 9, WHITE);
+    display.drawPixel(x + 6, y + 10, WHITE);
+    display.drawPixel(x + 7, y + 9, WHITE);
+  } else if (humor == 1) {                                   // preocupado: olhos grandes + gota de suor
+    display.drawFastVLine(x + 3, y + 5, 2, WHITE);
+    display.drawFastVLine(x + 9, y + 5, 2, WHITE);
+    display.drawFastVLine(x + 6, y + 9, 2, WHITE);
+    display.drawFastVLine(x - 4, y + 1 + (int)((t / 180) % 6), 2, WHITE);
+  } else {
+    if (piscando) {
+      display.drawFastHLine(x + 2, y + 6, 2, WHITE);
+      display.drawFastHLine(x + 8, y + 6, 2, WHITE);
+    } else {
+      display.drawPixel(x + 3, y + 6, WHITE);
+      display.drawPixel(x + 9, y + 6, WHITE);
+    }
+    display.drawPixel(x + 6, y + 9, WHITE);
+  }
+}
+
+void monCabecalho(const char* titulo) {
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 2);
+  display.print(titulo);
+  for (int i = 0; i < MON_N_PAGS; i++) {                     // pontinhos de pagina
+    if (i == monPag) display.fillRect(72 + i * 6, 4, 3, 3, WHITE);
+    else             display.drawPixel(72 + i * 6 + 1, 5, WHITE);
+  }
+  monPurin(114, 0, monHumor(), (millis() % 3200) < 120);
+  display.drawFastHLine(0, 13, SCREEN_W, WHITE);
+}
+
+// ============================================================
+//  pagina 0: memoria
+// ============================================================
+void monPagMemoria(unsigned long t) {
+  char buf[24];
+  uint32_t livre  = ESP.getFreeHeap();
+  uint32_t total  = ESP.getHeapSize();
+  uint32_t minimo = ESP.getMinFreeHeap();
+  int uso = (total > 0) ? (int)(100 - (uint64_t)livre * 100 / total) : 0;
+
+  monCabecalho("> memoria");
+
+  display.setCursor(0, 17);
+  display.print("livre");
+  snprintf(buf, sizeof(buf), "%luK", (unsigned long)(livre / 1024));
+  display.setTextSize(2);
+  display.setCursor(0, 26);
+  display.print(buf);
+  display.setTextSize(1);
+  snprintf(buf, sizeof(buf), "min %luK", (unsigned long)(minimo / 1024));
+  display.setCursor(0, 42);
+  display.print(buf);
+
+  int fill = (56 * uso) / 100;                               // barra de uso com brilhinho na ponta
+  display.drawRect(0, 54, 60, 7, WHITE);
+  display.fillRect(2, 56, fill, 3, WHITE);
+  if (fill > 0 && (t / 300) % 2 == 0) brilhinho(2 + fill, 57, 1);
+
+  monMoldura(66, 16, 62, 36, 10);                            // grafico da RAM livre
+  int32_t lo, hi;
+  monEscalaRam(60, lo, hi);
+  monCurva(67, 17, 60, 34, monHistRam, lo, hi, 1);
+  snprintf(buf, sizeof(buf), "uso %d%%", uso);
+  display.setCursor(66, 54);
+  display.print(buf);
+}
+
+// ============================================================
+//  pagina 1: wi-fi
+// ============================================================
+void monPagWifi(unsigned long t) {
+  char buf[24];
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  int rssi = ok ? WiFi.RSSI() : -100;
+  int barras = 0;
+  const char* qualidade = "off";
+  if (ok) {
+    if      (rssi >= -55) { barras = 4; qualidade = "otimo"; }
+    else if (rssi >= -65) { barras = 3; qualidade = "bom";   }
+    else if (rssi >= -75) { barras = 2; qualidade = "fraco"; }
+    else                  { barras = 1; qualidade = "ruim";  }
+  }
+
+  monCabecalho("> wi-fi");
+
+  snprintf(buf, sizeof(buf), "%.10s", WIFI_SSID);
+  display.setCursor(0, 17);
+  display.print(buf);
+
+  if (ok) snprintf(buf, sizeof(buf), "%d", rssi);
+  else    snprintf(buf, sizeof(buf), "---");
+  display.setTextSize(2);
+  display.setCursor(0, 27);
+  display.print(buf);
+  display.setTextSize(1);
+  display.setCursor(38, 34);
+  display.print("dBm");
+
+  for (int i = 0; i < 4; i++) {                              // barrinhas de sinal
+    int h = 2 + i * 2;
+    if (i < barras) display.fillRect(i * 5, 52 - h, 3, h, WHITE);
+    else            display.drawFastHLine(i * 5, 51, 3, WHITE);
+  }
+  display.setCursor(24, 44);
+  display.print(qualidade);
+  if (barras == 4 && (t / 350) % 2 == 0) brilhinho(58, 47, 1);   // sinal otimo: brilhinho
+
+  monMoldura(64, 16, 64, 34, 8);
+  monCurva(65, 17, 62, 32, monHistWifi, -100, -30, 0);
+
+  display.setCursor(0, 55);                                  // linha de status
+  if (monRecon == 1) {
+    snprintf(buf, sizeof(buf), "conectando%.*s", (int)((t / 300) % 4), "...");
+    display.print(buf);
+  } else if (monRecon == 2) {
+    display.print("conectado!");
+    brilhinho(70, 58, ((t / 150) % 2) ? 2 : 1);
+  } else if (monRecon == 3) {
+    display.print("falhou :(");
+  } else if (!ok) {
+    if ((t / 500) % 2 == 0) display.print("[OK] reconectar");
+  } else if ((t / 3000) % 2 == 0) {                          // alterna IP e dica
+    IPAddress ip = WiFi.localIP();
+    snprintf(buf, sizeof(buf), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+    display.print(buf);
+  } else {
+    display.print("[OK] reconectar");
+  }
+}
+
+void monWifiReconecta() {
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_SENHA, 6);
+  monRecon = 1;
+  monTRecon = millis();
+}
+
+void monWifiAtualiza() {
+  unsigned long t = millis();
+  if (monRecon == 1) {
+    if (t - monTRecon > 600 && WiFi.status() == WL_CONNECTED) {
+      monRecon = 2;
+      monTRecon = t;
+      tocaTom(1319, 60, false);
+      tocaTom(1760, 90, false);
+    } else if (t - monTRecon > 10000) {
+      monRecon = 3;
+      monTRecon = t;
+      somErro();
+    }
+  } else if ((monRecon == 2 || monRecon == 3) && t - monTRecon > 2500) {
+    monRecon = 0;
+  }
+}
+
+// ============================================================
+//  pagina 2: sistema
+// ============================================================
+void monBarra(int x, int y, int w, int pct, unsigned long t) {
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  int fill = ((w - 4) * pct) / 100;
+  display.drawRect(x, y, w, 7, WHITE);
+  display.fillRect(x + 2, y + 2, fill, 3, WHITE);
+  if (fill > 0 && (t / 300) % 2 == 0) brilhinho(x + 2 + fill, y + 3, 1);
+}
+
+void monPagSistema(unsigned long t) {
+  char buf[28];
+  monCabecalho("> sistema");
+
+  unsigned long s = millis() / 1000;                         // uptime
+  snprintf(buf, sizeof(buf), "uptime %02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
+  display.setCursor(0, 16);
+  display.print(buf);
+
+  float temp = temperatureRead();                            // temperatura (20 a 80 C)
+  snprintf(buf, sizeof(buf), "temp %.1fC", temp);
+  display.setCursor(0, 25);
+  display.print(buf);
+  monBarra(72, 25, 56, (int)((temp - 20.0f) * 100.0f / 60.0f), t);
+
+  int bat = monBateriaPct();                                 // bateria
+  if (bat >= 0) {
+    snprintf(buf, sizeof(buf), "bat %d%%", bat);
+    display.setCursor(0, 34);
+    display.print(buf);
+    monBarra(72, 34, 56, bat, t);
+  } else {
+    display.setCursor(0, 34);
+    display.print("energia: USB");
+  }
+
+  snprintf(buf, sizeof(buf), "cpu %luMHz flash %luMB",
+           (unsigned long)ESP.getCpuFreqMHz(),
+           (unsigned long)(ESP.getFlashChipSize() / (1024UL * 1024UL)));
+  display.setCursor(0, 43);
+  display.print(buf);
+
+  uint32_t prog = ESP.getSketchSize();                       // espaco usado pelo programa
+  uint32_t resto = ESP.getFreeSketchSpace();
+  int pctProg = (prog + resto > 0) ? (int)((uint64_t)prog * 100 / (prog + resto)) : 0;
+  snprintf(buf, sizeof(buf), "sketch %d%%", pctProg);
+  display.setCursor(0, 52);
+  display.print(buf);
+  monBarra(66, 52, 62, pctProg, t);
+}
+
+// ============================================================
+//  pagina 3: osciloscopio
+// ============================================================
+void monPagScope(unsigned long t) {
+  monCabecalho("> scope");
+  monMoldura(0, 15, SCREEN_W, 49, 16);
+
+  int32_t lo, hi;
+  monEscalaRam(124, lo, hi);
+  monCurva(2, 27, 124, 35, monHistRam,  lo,   hi,  0);       // RAM: linha cheia
+  monCurva(2, 27, 124, 35, monHistWifi, -100, -30, 2);       // Wi-Fi: tracejada
+
+  int sx = 2 + (int)((t / 25) % 124);                        // linha de varredura
+  for (int yy = 27; yy < 62; yy += 3) display.drawPixel(sx, yy, WHITE);
+
+  display.fillRect(2, 16, 70, 9, BLACK);                     // legenda
+  display.setCursor(3, 17);
+  display.print("ram");
+  display.drawFastHLine(23, 20, 9, WHITE);
+  display.setCursor(38, 17);
+  display.print("wifi");
+  for (int x = 64; x < 73; x += 2) display.drawPixel(x, 20, WHITE);
+}
+
+// ============================================================
+//  pagina 4: recordes
+// ============================================================
+void monPagRecordes(unsigned long t) {
+  char buf[16];
+  monCabecalho("> recordes");
+
+  for (int i = 0; i < 5; i++) {
+    int y = 16 + i * 9;
+    bool tem;
+    if (i < 4) {
+      tem = monRecs[i] > 0;
+      if (tem) snprintf(buf, sizeof(buf), "%d", monRecs[i]);
+    } else {
+      tem = monSudBest > 0;
+      if (tem) snprintf(buf, sizeof(buf), "%02d:%02d", monSudBest / 60 % 100, monSudBest % 60);
+    }
+    if (!tem) snprintf(buf, sizeof(buf), "--");
+
+    if (tem) {                                               // trofeuzinho + brilhinho
+      for (int r = 0; r < 7; r++)
+        for (int c = 0; c < 7; c++)
+          if (MON_TROFEU[r] & (0x40 >> c)) display.drawPixel(2 + c, y + r, WHITE);
+      if ((t / 400 + i) % 3 == 0) brilhinho(10, y + 3, 1);
+    } else {
+      display.drawPixel(5, y + 3, WHITE);
+    }
+    display.setCursor(12, y);
+    display.print(NOMES_JOGOS[i]);
+    display.setCursor(125 - (int)strlen(buf) * 6, y);
+    display.print(buf);
+  }
+}
+
+// ============================================================
+//  pagina 5: sobre
+// ============================================================
+void monPagSobre(unsigned long t) {
+  char buf[24];
+  monCabecalho("> sobre");
+  ceuEstrelado(0, 15, 127, 63, 10, 71);
+
+  float fase = (t % 1100) / 1100.0f;                         // Purin pulando
+  int pulo = 0, amassa = 0;
+  if (fase < 0.15f)      { amassa = 3; }
+  else if (fase < 0.75f) { float u = (fase - 0.15f) / 0.60f; pulo = (int)(4 * u * (1 - u) * 10); }
+  else if (fase < 0.88f) { amassa = 2; }
+  desenhaPurin(22, 58, pulo, amassa);
+
+  display.setCursor(48, 18);
+  display.print("CYBERDECK");
+  display.setCursor(48, 28);
+  display.print("versao " MON_VERSAO);
+  snprintf(buf, sizeof(buf), "para %.7s", NOME);
+  display.setCursor(48, 38);
+  display.print(buf);
+  display.setCursor(48, 48);
+  display.print("ESP32 + OLED");
+
+  if (!monSegredo) {
+    if ((t / 600) % 2 == 0) brilhinho(121, 57, 1);           // dica discreta: tem segredo aqui
+  } else {
+    display.fillRoundRect(1, 17, 126, 43, 5, BLACK);
+    display.drawRoundRect(1, 17, 126, 43, 5, WHITE);
+    ceuEstrelado(4, 20, 123, 56, 6, 72);
+    textoCentralizado(MON_SEGREDO1, 29);
+    textoCentralizado(MON_SEGREDO2, 40);
+    desenhaBmp7(14, 52 - (int)((t / 140) % 10), BMP_CORACAO, 6, 1);       // coracoes subindo
+    desenhaBmp7(113, 50 - (int)((t / 170) % 10), BMP_CORACAO, 6, 1);
+    desenhaBmp7(64, 54 - (int)((t / 200) % 10), BMP_CORACAO, 6, 1);
+  }
+}
+
+// ============================================================
+//  tela principal do monitor
+// ============================================================
+void monAbrir() {                            // chamado pelo menu
+  carregarRecordes();
+  for (int i = 0; i < 4; i++) monRecs[i] = recordes[i];
+  monSudBest = 0;                            // menor tempo de sudoku entre todos os niveis
+  char k[8];
+  for (int i = 0; i < 9; i++) {
+    snprintf(k, sizeof(k), "sud%d", i);
+    int v = preferencias.getInt(k, 0);
+    if (v > 0 && (monSudBest == 0 || v < monSudBest)) monSudBest = v;
+  }
+  monSegredo = false;
+  monTPag = millis();
+  telaAtual = TELA_MONITOR;
+}
+
+void monIrPara(int dir) {
+  monPag = (monPag + dir + MON_N_PAGS) % MON_N_PAGS;
+  monTPag = millis();
+  monSegredo = false;
+  somTique();
+}
+
+void monTela() {
+  ultimaAtividade = millis();                // monitor aberto = acordado
+  unsigned long t = millis();
+
+  if (clicou(bUp,   false)) monIrPara(-1);
+  if (clicou(bDown, false)) monIrPara(+1);
+  if (clicou(bOk,   false)) {
+    if (monPag == 1) {                       // Wi-Fi: reconectar
+      somConfirma();
+      monWifiReconecta();
+    } else if (monPag == 5) {                // Sobre: revela / esconde o segredo
+      monSegredo = !monSegredo;
+      if (monSegredo) {
+        tocaTom(1319, 80, false);
+        tocaTom(1568, 80, false);
+        tocaTom(2093, 140, false);
+      } else {
+        somConfirma();
+      }
+    } else {
+      monIrPara(+1);
+    }
+  }
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
+
+  monWifiAtualiza();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  switch (monPag) {
+    case 0: monPagMemoria(t);  break;
+    case 1: monPagWifi(t);     break;
+    case 2: monPagSistema(t);  break;
+    case 3: monPagScope(t);    break;
+    case 4: monPagRecordes(t); break;
+    case 5: monPagSobre(t);    break;
+  }
+
+  unsigned long dt = t - monTPag;            // cortina de troca de pagina (igual ao relogio)
+  if (dt < DUR_WIPE) {
+    int rx = (int)(SCREEN_W * dt / DUR_WIPE);
+    display.fillRect(rx, 0, SCREEN_W - rx, SCREEN_H, BLACK);
+    display.drawFastVLine(rx, 0, SCREEN_H, WHITE);
+  }
+  display.display();
+}
 
 
 // ---------------- SETUP / LOOP ----------------
@@ -5647,6 +6224,7 @@ void loop() {
   wifiAtualiza();
   atualizaPet();
   atualizaHorarioPet();
+  monAmostra();
 
     // ---- protecao de tela (descanso) ----
   if (algumBotao()) {
@@ -5706,6 +6284,7 @@ void loop() {
     case TELA_VELHA_JOGO: vhTelaJogo(); break;
     case TELA_SUDOKU: sudTela(); break;
     case TELA_MEMORIA: memTela(); break;
+    case TELA_MONITOR: monTela(); break;
 
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
