@@ -56,9 +56,26 @@ enum Tela {
   TELA_JOGOS_MENU,
   TELA_DINO,
   TELA_PONG,
+  TELA_VELHA_MENU,
+  TELA_VELHA_JOGO,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
+
+// ===== Variaveis Jogo da Velha =====
+
+char velhaTabuleiro[9];
+int velhaCursor = 4;
+int velhaModo = 0;          // 0 = contra Purin, 1 = dois jogadores
+int velhaDificuldade = 1;   // 0 = facil, 1 = medio, 2 = dificil
+int velhaMenuOpcao = 0;
+char velhaJogador = 'X';
+bool velhaFim = false;
+char velhaVencedor = ' ';
+int velhaVitoriasX = 0;
+int velhaVitoriasO = 0;
+int velhaEmpates = 0;
+
 
 // ===== CONFIGURACOES DO CYBERDECK =====
 Preferences preferencias;
@@ -2715,6 +2732,111 @@ enum EstadoJogo { JG_INTRO, JG_JOGANDO, JG_PONTO, JG_VITORIA, JG_FIM };
 unsigned long avisoJogoAte = 0;
 int recordes[N_JOGOS] = { 0, 0, 0, 0, 0 };   // 0 dino | 1 pong | 2 velha | 3 memoria | 4 sudoku
 
+
+
+void telaVelhaMenu() {
+  display.clearDisplay();
+
+  display.drawRoundRect(1, 1, 126, 62, 5, WHITE);
+  display.drawRoundRect(4, 4, 120, 56, 3, WHITE);
+
+  display.fillRoundRect(12, 5, 104, 10, 2, WHITE);
+  display.setTextColor(BLACK);
+  display.setTextSize(1);
+  display.setCursor(27, 7);
+  display.print("JOGO DA VELHA");
+
+  // Estrelas decorativas
+  for (int i = 0; i < 5; i++) {
+    int x = 15 + i * 24;
+    int y = 19 + (i % 2) * 2;
+    if ((millis() / 300 + i) % 2 == 0) {
+      display.drawPixel(x, y, WHITE);
+    }
+  }
+
+  const char* opcoes[] = {
+    "Contra o Purin",
+    "2 jogadores",
+    "Dificuldade",
+    "Jogar!"
+  };
+
+  for (int i = 0; i < 4; i++) {
+    int y = 23 + i * 9;
+
+    if (velhaMenuOpcao == i) {
+      display.fillRoundRect(10, y, 108, 8, 2, WHITE);
+      display.setTextColor(BLACK);
+    } else {
+      display.setTextColor(WHITE);
+    }
+
+    display.setCursor(14, y + 1);
+    display.print(opcoes[i]);
+
+    if (i == 0) {
+      display.setCursor(88, y + 1);
+      display.print(velhaModo == 0 ? "ON" : "OFF");
+    } else if (i == 1) {
+      display.setCursor(88, y + 1);
+      display.print(velhaModo == 1 ? "ON" : "OFF");
+    } else if (i == 2) {
+      display.setCursor(83, y + 1);
+      if (velhaDificuldade == 0) display.print("FACIL");
+      else if (velhaDificuldade == 1) display.print("MED");
+      else display.print("DIF");
+    }
+  }
+
+  display.display();
+}
+
+
+void controlarVelhaMenu() {
+  if (clicou(bUp, true)) {
+    velhaMenuOpcao = (velhaMenuOpcao + 3) % 4;
+    somTique();
+  }
+
+  if (clicou(bDown, true)) {
+    velhaMenuOpcao = (velhaMenuOpcao + 1) % 4;
+    somTique();
+  }
+
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_JOGOS_MENU;
+    return;
+  }
+
+  if (clicou(bOk, false)) {
+    somConfirma();
+
+    if (velhaMenuOpcao == 0) {
+      velhaModo = 0;
+    } else if (velhaMenuOpcao == 1) {
+      velhaModo = 1;
+    } else if (velhaMenuOpcao == 2) {
+      velhaDificuldade = (velhaDificuldade + 1) % 3;
+    } else {
+      for (int i = 0; i < 9; i++) {
+        velhaTabuleiro[i] = ' ';
+      }
+
+      velhaCursor = 4;
+      velhaJogador = 'X';
+      velhaFim = false;
+      velhaVencedor = ' ';
+      telaAtual = TELA_VELHA_JOGO;
+    }
+
+    esperaSoltar();
+  }
+}
+
+
 // ---------------- RECORDES (salvos na memoria) ----------------
 void carregarRecordes() {
   char chave[8];
@@ -3280,52 +3402,632 @@ void telaPong() {
 // ============================================================
 //  MENU DOS MINI JOGOS
 // ============================================================
+
 void abrirJogo(int i) {
   switch (i) {
-    case 0: iniciaDino(); telaAtual = TELA_DINO; break;
-    case 1: iniciaPong(); telaAtual = TELA_PONG; break;
-    default: avisoJogoAte = millis() + 1200; break;     // os outros chegam na etapa 2
+    case 0:
+      iniciaDino();
+      telaAtual = TELA_DINO;
+      break;
+
+    case 1:
+      iniciaPong();
+      telaAtual = TELA_PONG;
+      break;
+
+    case 2:
+      vhAbrir();
+      break;
+
+    case 3:
+      // Memoria: sera implementado depois.
+      avisoJogoAte = millis() + 1200;
+      break;
+
+    case 4:
+      // Sudoku: sera implementado depois.
+      avisoJogoAte = millis() + 1200;
+      break;
   }
 }
 
+
+
 void telaJogosMenu() {
-  if (clicou(bUp, true))    { jogoSel = (jogoSel + N_JOGOS - 1) % N_JOGOS; somTique(); }
-  if (clicou(bDown, true))  { jogoSel = (jogoSel + 1) % N_JOGOS; somTique(); }
-  if (clicou(bOk, false))   { somConfirma(); abrirJogo(jogoSel); return; }
-  if (clicou(bBack, false)) { somVoltar(); esperaSoltar(); telaAtual = TELA_MENU; return; }
+  if (clicou(bUp, true)) {
+    jogoSel = (jogoSel + N_JOGOS - 1) % N_JOGOS;
+    somTique();
+  }
+
+  if (clicou(bDown, true)) {
+    jogoSel = (jogoSel + 1) % N_JOGOS;
+    somTique();
+  }
+
+  if (clicou(bOk, false)) {
+    somConfirma();
+    esperaSoltar();
+    abrirJogo(jogoSel);
+    return;
+  }
+
+  if (clicou(bBack, false)) {
+    somVoltar();
+    esperaSoltar();
+    telaAtual = TELA_MENU;
+    return;
+  }
 
   unsigned long t = millis();
   display.clearDisplay();
-  display.setTextSize(1);
 
-  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  // Moldura externa do fliperama
+  display.drawRoundRect(1, 1, 126, 62, 5, WHITE);
+  display.drawRoundRect(4, 4, 120, 56, 3, WHITE);
+
+  // Titulo
+  display.fillRoundRect(12, 5, 104, 10, 2, WHITE);
   display.setTextColor(BLACK);
-  if (t < avisoJogoAte) {
-    if ((t / 200) % 2 == 0) { display.setCursor(25, 1); display.print("[ em breve! ]"); }
-  } else {
-    display.setCursor(34, 1);
-    display.print("MINI JOGOS");
-  }
+  display.setTextSize(1);
+  display.setCursor(30, 7);
+  display.print("GAME CENTER");
 
-  for (int i = 0; i < N_JOGOS; i++) {
-    int y = 11 + i * 10;
-    bool sel = (i == jogoSel);
-    if (sel) display.fillRect(0, y, SCREEN_W, 10, WHITE);
-    display.setTextColor(sel ? BLACK : WHITE);
-    if (sel) { display.setCursor(3, y + 1); display.print(">"); }
-    display.setCursor(12, y + 1);
-    display.print(NOMES_JOGOS[i]);
+  // Estrelas animadas
+  for (int i = 0; i < 6; i++) {
+    int x = 8 + i * 22;
+    int y = 19 + ((i % 2) * 3);
 
-    if (recordes[i] > 0) {
-      char buf[12];
-      snprintf(buf, sizeof(buf), "%d", recordes[i]);
-      display.setCursor(125 - (int)strlen(buf) * 6, y + 1);
-      display.print(buf);
+    if ((t / 250 + i) % 3 == 0) {
+      display.drawPixel(x, y, WHITE);
+      display.drawPixel(x - 1, y, WHITE);
+      display.drawPixel(x + 1, y, WHITE);
+      display.drawPixel(x, y - 1, WHITE);
+      display.drawPixel(x, y + 1, WHITE);
+    } else {
+      display.drawPixel(x, y, WHITE);
     }
   }
+
+  // Cartao do jogo selecionado
+  display.drawRoundRect(13, 22, 102, 29, 4, WHITE);
+
+  // Indicadores de navegacao
   display.setTextColor(WHITE);
+  display.setCursor(5, 32);
+  display.print("<");
+  display.setCursor(117, 32);
+  display.print(">");
+
+  // Icones em pixel art: Dino Purin e Pong
+  
+  // Icones em pixel art centralizados no cartao
+  if (jogoSel == 0) {
+    // Carinha do Purin centralizada
+    display.fillRoundRect(48, 28, 23, 17, 5, WHITE);
+    display.fillRoundRect(53, 25, 13, 5, 2, WHITE);
+    display.fillCircle(54, 35, 1, BLACK);
+    display.fillCircle(65, 35, 1, BLACK);
+    display.drawPixel(59, 39, BLACK);
+    display.drawPixel(60, 39, BLACK);
+
+    // Obstaculos do Dino
+    display.drawRect(76, 38, 4, 7, WHITE);
+    display.drawRect(83, 35, 4, 10, WHITE);
+    display.drawPixel(79, 36, WHITE);
+
+  } else if (jogoSel == 1) {
+    // Pong centralizado
+    display.fillRoundRect(44, 29, 3, 13, 1, WHITE);
+    display.fillRoundRect(81, 29, 3, 13, 1, WHITE);
+
+    // Bola animada
+    if ((t / 250) % 2 == 0) {
+      display.fillCircle(62, 35, 2, WHITE);
+    } else {
+      display.fillCircle(67, 35, 2, WHITE);
+    }
+
+    // Linha central
+    for (int y = 27; y < 46; y += 5) {
+      display.drawPixel(64, y, WHITE);
+    }
+
+  } else if (jogoSel == 2) {
+    vhIconeCard();
+  } else {
+    // Icone generico centralizado
+    display.drawRoundRect(51, 27, 26, 19, 3, WHITE);
+    display.drawRoundRect(55, 30, 18, 13, 2, WHITE);
+    display.drawPixel(61, 34, WHITE);
+    display.drawPixel(67, 34, WHITE);
+    display.drawPixel(61, 38, WHITE);
+    display.drawPixel(67, 38, WHITE);
+  }
+
+
+  // Nome do jogo
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  const char* nome = NOMES_JOGOS[jogoSel];
+  int larguraNome = strlen(nome) * 6;
+  int xNome = (SCREEN_W - larguraNome) / 2;
+
+  if (larguraNome > 116) xNome = 6;
+
+  display.fillRect(8, 52, 112, 7, BLACK);
+  display.setCursor(xNome, 52);
+  display.print(nome);
+
+  // Recorde
+  if (jogoSel >= 0 && jogoSel < N_JOGOS && recordes[jogoSel] > 0) {
+    display.setCursor(88, 52);
+    display.print("R:");
+    display.print(recordes[jogoSel]);
+  }
+
   display.display();
 }
+
+
+// ============================================================
+//  JOGO DA VELHA - menu novo + jogo completo
+//  Contra o Purin (voce = X, Purin = O) ou 2 jogadores
+//  Recorde = maior sequencia de pontos contra o Purin
+// ============================================================
+const uint8_t VH_LINHAS[8][3] = { {0,1,2},{3,4,5},{6,7,8},{0,3,6},{1,4,7},{2,5,8},{0,4,8},{2,4,6} };
+const char* VH_NIVEIS[3] = { "FACIL", "MEDIO", "DIFICIL" };
+
+const int VH_JOGANDO = 0, VH_PENSANDO = 1, VH_RESULTADO = 2, VH_FIM = 3;
+const int VH_X0 = 5, VH_Y0 = 12, VH_C = 17;           // posicao e tamanho das casas
+
+char vhTab[9] = { ' ',' ',' ',' ',' ',' ',' ',' ',' ' };
+int  vhCursor = 4;
+int  vhModo = 0;              // 0 = contra o Purin | 1 = dois jogadores
+int  vhNivel = 1;             // 0 facil | 1 medio | 2 dificil
+int  vhMenuSel = 0;           // 0 modo | 1 nivel | 2 jogar
+char vhVez = 'X';
+char vhInicia = 'X';          // quem comeca a rodada (alterna)
+int  vhEstado = VH_JOGANDO;
+char vhResultado = ' ';       // 'X', 'O' ou 'E' (empate)
+int  vhLinhaVit = -1;
+int  vhPlacarX = 0, vhPlacarO = 0, vhPlacarE = 0;
+int  vhPontos = 0, vhGanho = 0;
+bool vhNovoRec = false;
+unsigned long vhT = 0, vhEspera = 800;
+
+// ---------------- REGRAS ----------------
+int vhVencedorTab() {                      // indice da linha vencedora, ou -1
+  for (int l = 0; l < 8; l++) {
+    char a = vhTab[VH_LINHAS[l][0]];
+    if (a != ' ' && a == vhTab[VH_LINHAS[l][1]] && a == vhTab[VH_LINHAS[l][2]]) return l;
+  }
+  return -1;
+}
+
+int vhLivres() {
+  int n = 0;
+  for (int i = 0; i < 9; i++) if (vhTab[i] == ' ') n++;
+  return n;
+}
+
+// valor do ponto de vista do Purin (O): positivo = O ganha, negativo = X ganha
+int vhMinimax(bool vezO, int prof) {
+  int l = vhVencedorTab();
+  if (l >= 0) return (vhTab[VH_LINHAS[l][0]] == 'O') ? (10 - prof) : (prof - 10);
+  if (vhLivres() == 0) return 0;
+  int melhor = vezO ? -100 : 100;
+  for (int i = 0; i < 9; i++) {
+    if (vhTab[i] != ' ') continue;
+    vhTab[i] = vezO ? 'O' : 'X';
+    int v = vhMinimax(!vezO, prof + 1);
+    vhTab[i] = ' ';
+    if (vezO) { if (v > melhor) melhor = v; }
+    else      { if (v < melhor) melhor = v; }
+  }
+  return melhor;
+}
+
+// casa que faz 'm' completar uma linha agora (ou -1)
+int vhJogadaQueFecha(char m) {
+  for (int i = 0; i < 9; i++) {
+    if (vhTab[i] != ' ') continue;
+    vhTab[i] = m;
+    bool fecha = (vhVencedorTab() >= 0);
+    vhTab[i] = ' ';
+    if (fecha) return i;
+  }
+  return -1;
+}
+
+int vhEscolheJogadaPurin() {
+  int livres[9], n = 0;
+  for (int i = 0; i < 9; i++) if (vhTab[i] == ' ') livres[n++] = i;
+  if (n == 0) return -1;
+
+  if (vhNivel == 2) {                                     // DIFICIL: perfeito
+    if (n == 9) { const int ini[5] = { 0, 2, 4, 6, 8 }; return ini[random(5)]; }
+    int melhorV = -1000, cand[9], nc = 0;
+    for (int k = 0; k < n; k++) {
+      vhTab[livres[k]] = 'O';
+      int v = vhMinimax(false, 1);
+      vhTab[livres[k]] = ' ';
+      if (v > melhorV) { melhorV = v; nc = 0; }
+      if (v == melhorV) cand[nc++] = livres[k];
+    }
+    return cand[random(nc)];
+  }
+
+  int errar = (vhNivel == 0) ? 65 : 20;                   // % de jogadas "distraidas"
+  if (random(100) < errar) return livres[random(n)];
+
+  int j = vhJogadaQueFecha('O');                          // ganha se puder
+  if (j >= 0) return j;
+  j = vhJogadaQueFecha('X');                              // bloqueia voce
+  if (j >= 0) return j;
+
+  if (vhNivel == 1) {                                     // MEDIO: gosta de centro e cantos
+    if (vhTab[4] == ' ') return 4;
+    int cantos[4], nc = 0;
+    const int c[4] = { 0, 2, 6, 8 };
+    for (int k = 0; k < 4; k++) if (vhTab[c[k]] == ' ') cantos[nc++] = c[k];
+    if (nc > 0) return cantos[random(nc)];
+  }
+  return livres[random(n)];
+}
+
+// ---------------- FLUXO DO JOGO ----------------
+void vhMoveCursor(int dir) {               // anda pelas casas livres
+  for (int k = 1; k <= 9; k++) {
+    int c = (vhCursor + dir * k + 90) % 9;
+    if (vhTab[c] == ' ') { vhCursor = c; return; }
+  }
+}
+
+void vhPensarOuJogar() {
+  if (vhModo == 0 && vhVez == 'O') {
+    vhEstado = VH_PENSANDO;
+    vhT = millis();
+    vhEspera = random(550, 1100);
+  } else {
+    vhEstado = VH_JOGANDO;
+  }
+}
+
+void vhNovaRodada() {
+  for (int i = 0; i < 9; i++) vhTab[i] = ' ';
+  vhResultado = ' ';
+  vhLinhaVit = -1;
+  vhGanho = 0;
+  vhCursor = 4;
+  vhVez = vhInicia;
+  vhPensarOuJogar();
+}
+
+void vhComecar() {                         // chamado pelo menu
+  vhPlacarX = 0; vhPlacarO = 0; vhPlacarE = 0;
+  vhPontos = 0; vhNovoRec = false;
+  vhInicia = 'X';
+  vhNovaRodada();
+  telaAtual = TELA_VELHA_JOGO;
+}
+
+void vhAbrir() {                           // chamado pelo menu dos jogos
+  vhMenuSel = 0;
+  telaAtual = TELA_VELHA_MENU;
+}
+
+void vhEncerrarSequencia() {
+  vhNovoRec = registrarPontuacao(2, vhPontos);
+  vhEstado = VH_FIM;
+  if (vhNovoRec) somRecorde();
+  vhT = millis();
+}
+
+void vhFimRodada(char res) {
+  vhResultado = res;
+  if (res == 'X') vhPlacarX++; else if (res == 'O') vhPlacarO++; else vhPlacarE++;
+
+  vhGanho = 0;
+  if (vhModo == 0) {                       // pontos so contam contra o Purin
+    if (res == 'X')                    vhGanho = (vhNivel == 0) ? 1 : (vhNivel == 1 ? 3 : 8);
+    else if (res == 'E' && vhNivel == 2) vhGanho = 3;     // empatar com o perfeito vale!
+    vhPontos += vhGanho;
+  }
+
+  if (res == 'E') { tocaTom(659, 90, false); tocaTom(523, 140, false); }
+  else if (vhModo == 0 && res == 'O') somErro();
+  else { tocaTom(1319, 80, false); tocaTom(1568, 80, false); tocaTom(2093, 160, false); }
+
+  vhEstado = VH_RESULTADO;
+  vhT = millis();
+}
+
+void vhJoga(int casa) {
+  vhTab[casa] = vhVez;
+  tocaTom(vhVez == 'X' ? 1500 : 1100, 25, false);
+
+  int l = vhVencedorTab();
+  if (l >= 0)          { vhLinhaVit = l; vhFimRodada(vhVez); return; }
+  if (vhLivres() == 0) { vhFimRodada('E'); return; }
+
+  vhVez = (vhVez == 'X') ? 'O' : 'X';
+  if (vhTab[vhCursor] != ' ') vhMoveCursor(1);
+  vhPensarOuJogar();
+}
+
+// ---------------- DESENHO ----------------
+void vhDesenhaMarca(char m, int ox, int oy) {            // ox,oy = canto da casa
+  if (m == 'X') {
+    display.drawLine(ox + 3,  oy + 3, ox + 13, oy + 13, WHITE);
+    display.drawLine(ox + 4,  oy + 3, ox + 14, oy + 13, WHITE);
+    display.drawLine(ox + 13, oy + 3, ox + 3,  oy + 13, WHITE);
+    display.drawLine(ox + 14, oy + 3, ox + 4,  oy + 13, WHITE);
+  } else if (m == 'O') {
+    display.drawCircle(ox + 8, oy + 8, 6, WHITE);
+    display.drawCircle(ox + 8, oy + 8, 5, WHITE);
+  }
+}
+
+void vhDesenhaTabuleiro(unsigned long t, bool mostrarCursor) {
+  // grade
+  for (int k = 1; k <= 2; k++) {
+    display.fillRect(VH_X0 + k * VH_C - 1, VH_Y0 + 2, 2, 3 * VH_C - 4, WHITE);
+    display.fillRect(VH_X0 + 2, VH_Y0 + k * VH_C - 1, 3 * VH_C - 4, 2, WHITE);
+  }
+  for (int i = 0; i < 9; i++) {
+    int ox = VH_X0 + (i % 3) * VH_C;
+    int oy = VH_Y0 + (i / 3) * VH_C;
+
+    bool naLinha = false;
+    if (vhLinhaVit >= 0)
+      for (int k = 0; k < 3; k++) if (VH_LINHAS[vhLinhaVit][k] == i) naLinha = true;
+    bool esconde = naLinha && ((t / 220) % 2 == 1);      // marcas vencedoras piscam
+
+    if (vhTab[i] != ' ' && !esconde) vhDesenhaMarca(vhTab[i], ox, oy);
+
+    if (mostrarCursor && i == vhCursor) {
+      display.drawPixel(ox + 8, oy + 8, WHITE);
+      if ((t / 250) % 2 == 0) display.drawRect(ox + 1, oy + 1, 15, 15, WHITE);
+    }
+  }
+  if (vhLinhaVit >= 0) {                                  // risco por cima da linha
+    int a = VH_LINHAS[vhLinhaVit][0], c = VH_LINHAS[vhLinhaVit][2];
+    int x1 = VH_X0 + (a % 3) * VH_C + 8, y1 = VH_Y0 + (a / 3) * VH_C + 8;
+    int x2 = VH_X0 + (c % 3) * VH_C + 8, y2 = VH_Y0 + (c / 3) * VH_C + 8;
+    display.drawLine(x1, y1, x2, y2, WHITE);
+    display.drawLine(x1 + 1, y1, x2 + 1, y2, WHITE);
+    display.drawLine(x1, y1 + 1, x2, y2 + 1, WHITE);
+  }
+}
+
+void vhDesenhaJogo(unsigned long t) {
+  char buf[16];
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  // barra do topo
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(3, 1);
+  display.print("VELHA");
+  if (vhModo == 0) {
+    display.setCursor(40, 1);
+    display.print(VH_NIVEIS[vhNivel]);
+    bool pisca = (vhEstado == VH_RESULTADO && vhGanho > 0 && (t / 250) % 2 == 0);
+    if (!pisca) {
+      snprintf(buf, sizeof(buf), "PTS %d", vhPontos);
+      display.setCursor(125 - (int)strlen(buf) * 6, 1);
+      display.print(buf);
+    }
+  } else {
+    display.setCursor(125 - 6 * 6, 1);
+    display.print("2 JOG.");
+  }
+  display.setTextColor(WHITE);
+
+  vhDesenhaTabuleiro(t, vhEstado == VH_JOGANDO);
+
+  // placar (um pontinho marca de quem e a vez)
+  const int px = 61;
+  bool vezX = (vhEstado == VH_JOGANDO || vhEstado == VH_PENSANDO) && vhVez == 'X';
+  bool vezO = (vhEstado == VH_JOGANDO || vhEstado == VH_PENSANDO) && vhVez == 'O';
+  if (vezX) display.fillRect(57, 16, 3, 3, WHITE);
+  if (vezO) display.fillRect(57, 26, 3, 3, WHITE);
+
+  display.setCursor(px, 14);
+  if (vhModo == 0) snprintf(buf, sizeof(buf), "VOCE: %d", vhPlacarX);
+  else             snprintf(buf, sizeof(buf), "X: %d", vhPlacarX);
+  display.print(buf);
+  display.setCursor(px, 24);
+  if (vhModo == 0) snprintf(buf, sizeof(buf), "PURIN: %d", vhPlacarO);
+  else             snprintf(buf, sizeof(buf), "O: %d", vhPlacarO);
+  display.print(buf);
+  display.setCursor(px, 34);
+  snprintf(buf, sizeof(buf), "EMPATE: %d", vhPlacarE);
+  display.print(buf);
+
+  // mensagens
+  const char* l1 = "";
+  const char* l2 = "";
+  if (vhEstado == VH_JOGANDO) {
+    if (vhModo == 0)       l1 = "SUA VEZ (X)";
+    else if (vhVez == 'X') l1 = "VEZ DO X";
+    else                   l1 = "VEZ DO O";
+    l2 = "OK: marcar";
+  } else if (vhEstado == VH_PENSANDO) {
+    int d = (t / 300) % 4;
+    l1 = (d == 0) ? "PENSANDO" : (d == 1) ? "PENSANDO." : (d == 2) ? "PENSANDO.." : "PENSANDO...";
+  } else if (vhEstado == VH_RESULTADO) {
+    if (vhResultado == 'E')       l1 = "EMPATE!";
+    else if (vhModo == 0)         l1 = (vhResultado == 'X') ? "VOCE VENCEU" : "PURIN GANHA";
+    else                          l1 = (vhResultado == 'X') ? "X VENCEU" : "O VENCEU";
+    if (!(vhModo == 0 && vhResultado == 'O')) l2 = "OK: proxima";
+  }
+  display.setCursor(px, 47); display.print(l1);
+  display.setCursor(px, 56); display.print(l2);
+
+  display.display();
+}
+
+// mini tabuleiro animado (enfeite do menu e do cartao dos jogos)
+void vhDesenhaMini(int x0, int y0, unsigned long t) {
+  const int c = 9;                                        // casas de 8px + 1px de grade
+  display.drawFastVLine(x0 + 8,  y0, 26, WHITE);
+  display.drawFastVLine(x0 + 17, y0, 26, WHITE);
+  display.drawFastHLine(x0, y0 + 8,  26, WHITE);
+  display.drawFastHLine(x0, y0 + 17, 26, WHITE);
+
+  const int jogadas[5] = { 4, 0, 2, 3, 6 };               // X4 O0 X2 O3 X6 -> X vence na diagonal
+  unsigned long ph = t % 3600;
+  int n = (int)(ph / 420);
+  if (n > 5) n = 5;
+  for (int i = 0; i < n; i++) {
+    int ox = x0 + (jogadas[i] % 3) * c, oy = y0 + (jogadas[i] / 3) * c;
+    if (i % 2 == 0) {
+      display.drawLine(ox + 1, oy + 1, ox + 6, oy + 6, WHITE);
+      display.drawLine(ox + 6, oy + 1, ox + 1, oy + 6, WHITE);
+    } else {
+      display.drawCircle(ox + 4, oy + 4, 3, WHITE);
+    }
+  }
+  if (ph >= 2100 && (t / 250) % 2 == 0) {
+    display.drawLine(x0 + 22, y0 + 4, x0 + 4, y0 + 22, WHITE);
+    display.drawLine(x0 + 23, y0 + 4, x0 + 5, y0 + 22, WHITE);
+  }
+}
+
+// desenho do cartao no "Game Center" (opcional)
+void vhIconeCard() {
+  vhDesenhaMini(51, 24, millis());
+}
+
+// ---------------- MENU ----------------
+void vhLinhaMenu(int y, const char* texto, bool sel, bool ativa) {
+  if (sel) {
+    display.fillRoundRect(34, y, 92, 14, 3, WHITE);
+    display.setTextColor(BLACK);
+  } else {
+    display.drawRoundRect(34, y, 92, 14, 3, WHITE);
+    display.setTextColor(WHITE);
+  }
+  display.setCursor(38, y + 3);
+  display.print(texto);
+  if (!ativa) {                                           // linha desativada: risca de pontilhado
+    for (int x = 38; x < 122; x += 3) display.drawPixel(x, y + 7, sel ? BLACK : WHITE);
+  }
+  display.setTextColor(WHITE);
+}
+
+void vhMoveMenu(int dir) {
+  do { vhMenuSel = (vhMenuSel + dir + 3) % 3; } while (vhMenuSel == 1 && vhModo == 1);
+  somTique();
+}
+
+void vhTelaMenu() {
+  if (clicou(bUp, true))   vhMoveMenu(-1);
+  if (clicou(bDown, true)) vhMoveMenu(+1);
+  if (clicou(bOk, false)) {
+    if (vhMenuSel == 0)      { vhModo = 1 - vhModo; somConfirma(); }
+    else if (vhMenuSel == 1) { vhNivel = (vhNivel + 1) % 3; somConfirma(); }
+    else { somConfirma(); esperaSoltar(); vhComecar(); return; }
+  }
+  if (clicou(bBack, false)) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+
+  unsigned long t = millis();
+  char buf[24];
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  // titulo com X e O nos cantos
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.drawLine(3, 2, 8, 7, BLACK);
+  display.drawLine(8, 2, 3, 7, BLACK);
+  display.drawCircle(122, 5, 3, BLACK);
+  display.setTextColor(BLACK);
+  display.setCursor(25, 1);
+  display.print("JOGO DA VELHA");
+  display.setTextColor(WHITE);
+
+  // tabuleiro animado + recorde
+  vhDesenhaMini(4, 16, t);
+  if (recordes[2] > 0) {
+    display.setCursor(4, 45);
+    display.print("REC");
+    display.setCursor(4, 54);
+    display.print(recordes[2]);
+  }
+
+  // opcoes
+  snprintf(buf, sizeof(buf), "Modo: %s", vhModo == 0 ? "Purin" : "2 jogador");
+  vhLinhaMenu(14, buf, vhMenuSel == 0, true);
+
+  if (vhModo == 0) snprintf(buf, sizeof(buf), "Nivel: %s", vhNivel == 0 ? "Facil" : (vhNivel == 1 ? "Medio" : "Dificil"));
+  else             snprintf(buf, sizeof(buf), "Nivel: --");
+  vhLinhaMenu(30, buf, vhMenuSel == 1, vhModo == 0);
+
+  bool jogarSel = (vhMenuSel == 2);
+  if (jogarSel) {
+    display.fillRoundRect(34, 46, 92, 14, 3, WHITE);
+    display.setTextColor(BLACK);
+  } else {
+    display.drawRoundRect(34, 46, 92, 14, 3, WHITE);
+  }
+  display.setCursor(56, 49);
+  display.print(jogarSel ? "> JOGAR! <" : "  JOGAR!  ");
+  display.setTextColor(WHITE);
+
+  display.display();
+}
+
+// ---------------- TELA DO JOGO ----------------
+void vhSair() {
+  if (vhModo == 0 && vhPontos > 0) { vhEncerrarSequencia(); return; }   // salva e mostra o resultado
+  somVoltar();
+  esperaSoltar();
+  telaAtual = TELA_VELHA_MENU;
+}
+
+void vhTelaJogo() {
+  ultimaAtividade = millis();
+  unsigned long t = millis();
+  bool cUp = clicou(bUp, true);
+  bool cDown = clicou(bDown, true);
+  bool cOk = clicou(bOk, false);
+  bool cBack = clicou(bBack, false);
+
+  if (vhEstado == VH_FIM) {
+    if (t - vhT > 700) {                                   // evita apertar sem querer
+      if (cBack) { somVoltar(); esperaSoltar(); telaAtual = TELA_VELHA_MENU; return; }
+      if (cOk)   { somConfirma(); vhComecar(); return; }
+    }
+    desenhaFimJogo("pts", vhPontos, vhNovoRec, recordes[2], t - vhT);
+    return;
+  }
+
+  if (cBack) { vhSair(); return; }
+
+  if (vhEstado == VH_JOGANDO) {
+    if (cUp)   { vhMoveCursor(-1); somTique(); }
+    if (cDown) { vhMoveCursor(+1); somTique(); }
+    if (cOk && vhTab[vhCursor] == ' ') { vhJoga(vhCursor); return; }
+  }
+  else if (vhEstado == VH_PENSANDO) {
+    if (t - vhT > vhEspera) { vhJoga(vhEscolheJogadaPurin()); return; }
+  }
+  else if (vhEstado == VH_RESULTADO) {
+    if (vhModo == 0 && vhResultado == 'O') {               // perdeu: a sequencia acaba
+      if (t - vhT > 1700) { vhEncerrarSequencia(); return; }
+    } else if (cOk && t - vhT > 400) {
+      vhInicia = (vhInicia == 'X') ? 'O' : 'X';            // quem comeca alterna
+      vhNovaRodada();
+      return;
+    }
+  }
+  vhDesenhaJogo(t);
+}
+
+
 
 // ---------------- SETUP / LOOP ----------------
 void setup() {
@@ -3420,6 +4122,9 @@ void loop() {
     case TELA_JOGOS_MENU: telaJogosMenu(); break;
     case TELA_DINO:       telaDino();      break;
     case TELA_PONG:       telaPong();      break;
+    case TELA_VELHA_MENU: vhTelaMenu(); break;
+    case TELA_VELHA_JOGO: vhTelaJogo(); break;
+
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
