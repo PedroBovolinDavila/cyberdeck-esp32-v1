@@ -58,6 +58,7 @@ enum Tela {
   TELA_PONG,
   TELA_VELHA_MENU,
   TELA_VELHA_JOGO,
+  TELA_SUDOKU,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -3425,8 +3426,7 @@ void abrirJogo(int i) {
       break;
 
     case 4:
-      // Sudoku: sera implementado depois.
-      avisoJogoAte = millis() + 1200;
+      sudAbrir();
       break;
   }
 }
@@ -3534,6 +3534,8 @@ void telaJogosMenu() {
 
   } else if (jogoSel == 2) {
     vhIconeCard();
+  } else if (jogoSel == 4) {
+    sudIconeCard();
   } else {
     // Icone generico centralizado
     display.drawRoundRect(51, 27, 26, 19, 3, WHITE);
@@ -3980,7 +3982,6 @@ void vhTelaMenu() {
   display.display();
 }
 
-// ---------------- TELA DO JOGO ----------------
 void vhSair() {
   if (vhModo == 0 && vhPontos > 0) { vhEncerrarSequencia(); return; }   // salva e mostra o resultado
   somVoltar();
@@ -4025,6 +4026,722 @@ void vhTelaJogo() {
     }
   }
   vhDesenhaJogo(t);
+}
+
+// ============================================================
+//  SUDOKU FOFO  (4x4, 6x6 ou 9x9 | facil, medio ou dificil)
+//  CIMA/BAIXO = escolher casa | OK = editar a casa
+//  editando: CIMA/BAIXO = numero | OK = salvar | BACK = cancelar
+//  Numeros que voce escreveu ficam "branquinhos"; se um deles
+//  ficar repetido por um tempinho, ele comeca a piscar.
+//  Recorde = melhor tempo de cada tamanho e nivel.
+// ============================================================
+#define SUD_E_TAM   0     // escolher tamanho
+#define SUD_E_DIF   1     // escolher nivel
+#define SUD_E_JOGO  2     // jogando
+#define SUD_E_SAIR  3     // "quer sair?"
+#define SUD_E_VIT   4     // comemorando
+#define SUD_E_FIM   5     // tela final
+
+#define SUD_ATRASO_ERRO 4000     // ms ate o numero repetido comecar a piscar
+#define SUD_MAX_NOS     30000    // limite de tentativas do conferidor de solucao unica
+
+const char* SUD_NOME_DIF[3] = { "FAC", "MED", "DIF" };
+const char* SUD_ROT_DIF[3]  = { "Facil", "Medio", "Dificil" };
+// quantas casas esconder [tamanho][nivel] (o gerador para antes se a solucao deixar de ser unica)
+const int SUD_REMOVER[3][3] = { { 6, 8, 10 }, { 14, 18, 22 }, { 36, 46, 52 } };
+
+const uint8_t BMP_CORACAO[6] = { 0b0110110, 0b1111111, 0b1111111, 0b0111110, 0b0011100, 0b0001000 };
+
+// fonte minuscula 3x5 (digitos 1 a 9)
+const uint8_t FONTE3X5[10][5] = {
+  {0,0,0,0,0},
+  {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1}, {7,4,7,1,7},
+  {7,4,7,5,7}, {7,1,1,2,2}, {7,5,7,5,7}, {7,5,7,1,7}
+};
+
+int sudEstado = SUD_E_TAM;
+int sudTamSel = 0, sudDifSel = 0;               // escolhas nos menus
+int sudTam = 0, sudDif = 0;                     // partida atual
+int sudN = 9, sudBR = 3, sudBC = 3, sudPasso = 7, sudX0 = 2, sudY0 = 0, sudRemover = 40;
+int8_t sudSol[81], sudGrade[81];
+bool sudFixo[81], sudErro[81];
+unsigned long sudErroT[81];                     // desde quando a casa esta repetida
+int sudCursor = 0, sudValorEdit = 0, sudVagas = 0, sudSegs = 0;
+bool sudEditando = false, sudNovoRec = false;
+unsigned long sudTInicio = 0, sudTFim = 0, sudTPausaIni = 0;
+int sudMelhor[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };   // segundos [tamanho*3 + nivel], 0 = sem recorde
+unsigned long sudNos = 0;
+
+// ---------------- decoracao ----------------
+void brilhinhoCor(int x, int y, int r, uint16_t cor) {
+  display.drawFastHLine(x - r, y, 2 * r + 1, cor);
+  display.drawFastVLine(x, y - r, 2 * r + 1, cor);
+}
+
+void brilhinho(int x, int y, int r) {
+  brilhinhoCor(x, y, r, WHITE);
+}
+
+// desenha um bitmap de 7 colunas centralizado em (cx,cy), ampliado "esc" vezes
+void desenhaBmp7(int cx, int cy, const uint8_t* linhas, int n, int esc) {
+  int x0 = cx - (7 * esc) / 2;
+  int y0 = cy - (n * esc) / 2;
+  for (int r = 0; r < n; r++)
+    for (int c = 0; c < 7; c++)
+      if (linhas[r] & (1 << (6 - c)))
+        display.fillRect(x0 + c * esc, y0 + r * esc, esc, esc, WHITE);
+}
+
+// estrelinhas piscando espalhadas numa regiao (sem = muda o "desenho" do ceu)
+void ceuEstrelado(int x0, int y0, int x1, int y1, int n, int sem) {
+  unsigned long t = millis();
+  int w = x1 - x0 + 1, h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) return;
+  for (int i = 0; i < n; i++) {
+    uint32_t a = (uint32_t)(i + 1 + sem * 53) * 2654435761u;
+    uint32_t b = (a ^ (a >> 15)) * 2246822519u;
+    b ^= (b >> 13);
+    int x = x0 + (int)((a >> 16) % (uint32_t)w);
+    int y = y0 + (int)((b >> 16) % (uint32_t)h);
+    int per = 1100 + (int)((a >> 4) % 1400);
+    float r = (float)((t + ((b >> 5) % 2000)) % per) / per;
+    if (r < 0.45f) {
+      if (i % 3 == 0) brilhinho(x, y, 1);
+      else            display.drawPixel(x, y, WHITE);
+    } else if (r < 0.75f) {
+      display.drawPixel(x, y, WHITE);
+    }
+  }
+}
+
+void sudFormataTempo(char* buf, int tam, int segs) {
+  if (segs > 5999) segs = 5999;
+  if (segs < 0) segs = 0;
+  snprintf(buf, tam, "%02d:%02d", segs / 60, segs % 60);
+}
+
+// ---------------- configuracao e recordes ----------------
+void sudConfigura(int tam, int dif) {
+  sudTam = tam;
+  sudDif = dif;
+  if (tam == 0)      { sudN = 4; sudBR = 2; sudBC = 2; sudPasso = 14; sudX0 = 4; sudY0 = 3; }
+  else if (tam == 1) { sudN = 6; sudBR = 2; sudBC = 3; sudPasso = 10; sudX0 = 3; sudY0 = 1; }
+  else               { sudN = 9; sudBR = 3; sudBC = 3; sudPasso = 7;  sudX0 = 2; sudY0 = 0; }
+  sudRemover = SUD_REMOVER[tam][dif];
+}
+
+// menor tempo (de qualquer nivel) de um tamanho; 0 = nenhum
+int sudMelhorTam(int tam) {
+  int m = 0;
+  for (int d = 0; d < 3; d++) {
+    int v = sudMelhor[tam * 3 + d];
+    if (v > 0 && (m == 0 || v < m)) m = v;
+  }
+  return m;
+}
+
+void sudAbrir() {
+  char k[8];
+  for (int i = 0; i < 9; i++) {
+    snprintf(k, sizeof(k), "sud%d", i);
+    sudMelhor[i] = preferencias.getInt(k, 0);
+  }
+  sudEstado = SUD_E_TAM;
+  telaAtual = TELA_SUDOKU;
+}
+
+// ---------------- gerador (com solucao unica garantida) ----------------
+void sudEmbaralha(int* a, int n) {
+  for (int i = n - 1; i > 0; i--) {
+    int j = random(i + 1);
+    int tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+}
+
+int sudCaixa(int r, int c) {
+  return (r / sudBR) * (sudN / sudBC) + (c / sudBC);
+}
+
+// conta solucoes (ate "limite") usando sempre a casa com menos candidatos
+int sudResolve(int8_t* g, uint16_t* lm, uint16_t* cm, uint16_t* bm, int limite) {
+  if (++sudNos > SUD_MAX_NOS) return limite;           // desiste: trata como "varias"
+  int N = sudN;
+  uint16_t todos = (uint16_t)((1u << (N + 1)) - 2);    // bits 1..N
+  int melhor = -1, menorQtd = 100;
+  uint16_t melhorMask = 0;
+  for (int i = 0; i < N * N; i++) {
+    if (g[i] != 0) continue;
+    int r = i / N, c = i % N;
+    uint16_t livres = todos & ~(lm[r] | cm[c] | bm[sudCaixa(r, c)]);
+    int q = __builtin_popcount(livres);
+    if (q == 0) return 0;
+    if (q < menorQtd) {
+      menorQtd = q; melhor = i; melhorMask = livres;
+      if (q == 1) break;
+    }
+  }
+  if (melhor < 0) return 1;                            // tudo preenchido: achou uma solucao
+  int r = melhor / N, c = melhor % N, b = sudCaixa(r, c);
+  int total = 0;
+  for (int d = 1; d <= N; d++) {
+    if (!(melhorMask & (1u << d))) continue;
+    g[melhor] = d;
+    lm[r] |= (1u << d); cm[c] |= (1u << d); bm[b] |= (1u << d);
+    total += sudResolve(g, lm, cm, bm, limite - total);
+    g[melhor] = 0;
+    lm[r] &= ~(1u << d); cm[c] &= ~(1u << d); bm[b] &= ~(1u << d);
+    if (total >= limite) break;
+  }
+  return total;
+}
+
+// o tabuleiro atual (sudGrade) tem exatamente 1 solucao?
+bool sudUnica() {
+  int N = sudN;
+  int8_t g[81];
+  uint16_t lm[9], cm[9], bm[9];
+  for (int i = 0; i < 9; i++) { lm[i] = 0; cm[i] = 0; bm[i] = 0; }
+  for (int i = 0; i < N * N; i++) {
+    g[i] = sudGrade[i];
+    if (g[i] != 0) {
+      int r = i / N, c = i % N;
+      lm[r] |= (1u << g[i]); cm[c] |= (1u << g[i]); bm[sudCaixa(r, c)] |= (1u << g[i]);
+    }
+  }
+  sudNos = 0;
+  return sudResolve(g, lm, cm, bm, 2) == 1;
+}
+
+void sudCalculaErros() {
+  int N = sudN;
+  for (int i = 0; i < N * N; i++) sudErro[i] = false;
+  for (int i = 0; i < N * N; i++) {
+    int v = sudGrade[i];
+    if (v == 0 || sudFixo[i]) continue;                // so marca o que VOCE escreveu
+    int r = i / N, c = i % N;
+    for (int j = 0; j < N * N; j++) {
+      if (j == i || sudGrade[j] != v) continue;
+      int rj = j / N, cj = j % N;
+      if (rj == r || cj == c || (rj / sudBR == r / sudBR && cj / sudBC == c / sudBC)) {
+        sudErro[i] = true;
+        break;
+      }
+    }
+  }
+}
+
+// marca desde quando cada casa esta repetida (pra so piscar depois de um tempinho)
+void sudAtualizaErros() {
+  sudCalculaErros();
+  unsigned long agora = millis();
+  for (int i = 0; i < sudN * sudN; i++) {
+    if (sudErro[i]) { if (sudErroT[i] == 0) sudErroT[i] = (agora | 1); }
+    else            { sudErroT[i] = 0; }
+  }
+}
+
+bool sudTemErro() {
+  for (int i = 0; i < sudN * sudN; i++) if (sudErro[i]) return true;
+  return false;
+}
+
+void sudContaVagas() {
+  sudVagas = 0;
+  for (int i = 0; i < sudN * sudN; i++) if (sudGrade[i] == 0) sudVagas++;
+}
+
+void sudDesenhaGerando() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  ceuEstrelado(0, 0, 127, 63, 14, 36);
+  display.fillRoundRect(28, 14, 72, 36, 4, BLACK);
+  display.drawRoundRect(28, 14, 72, 36, 4, WHITE);
+  display.setCursor(31, 19);
+  display.print("montando...");
+  desenhaPurinMini(57, 32, 0, false);
+  display.display();
+}
+
+// gera uma grade valida (padrao base + embaralhar) e esconde casas mantendo solucao unica
+void sudGerar() {
+  int N = sudN, br = sudBR, bc = sudBC;
+  int nb = N / br, ns = N / bc;
+  int bandas[3], pilhas[3], dentro[3], linhas[9], colunas[9], digs[9];
+
+  for (int i = 0; i < nb; i++) bandas[i] = i;
+  sudEmbaralha(bandas, nb);
+  int k = 0;
+  for (int b = 0; b < nb; b++) {
+    for (int j = 0; j < br; j++) dentro[j] = j;
+    sudEmbaralha(dentro, br);
+    for (int j = 0; j < br; j++) linhas[k++] = bandas[b] * br + dentro[j];
+  }
+  for (int i = 0; i < ns; i++) pilhas[i] = i;
+  sudEmbaralha(pilhas, ns);
+  k = 0;
+  for (int s = 0; s < ns; s++) {
+    for (int j = 0; j < bc; j++) dentro[j] = j;
+    sudEmbaralha(dentro, bc);
+    for (int j = 0; j < bc; j++) colunas[k++] = pilhas[s] * bc + dentro[j];
+  }
+  for (int i = 0; i < N; i++) digs[i] = i + 1;
+  sudEmbaralha(digs, N);
+
+  for (int r = 0; r < N; r++) {
+    for (int c = 0; c < N; c++) {
+      int rr = linhas[r], cc = colunas[c];
+      int p = (bc * (rr % br) + rr / br + cc) % N;
+      sudSol[r * N + c] = digs[p];
+    }
+  }
+
+  // esconde casas uma a uma, so mantendo se a solucao continuar unica
+  int idx[81];
+  for (int i = 0; i < N * N; i++) { idx[i] = i; sudGrade[i] = sudSol[i]; sudFixo[i] = true; sudErroT[i] = 0; }
+  sudEmbaralha(idx, N * N);
+  int removidas = 0;
+  for (int q = 0; q < N * N && removidas < sudRemover; q++) {
+    int i = idx[q];
+    int8_t salvo = sudGrade[i];
+    sudGrade[i] = 0;
+    if (sudUnica()) { sudFixo[i] = false; removidas++; }
+    else            { sudGrade[i] = salvo; }
+    yield();
+  }
+
+  sudCursor = 0;
+  for (int i = 0; i < N * N; i++) if (!sudFixo[i]) { sudCursor = i; break; }
+  sudEditando = false;
+  sudNovoRec = false;
+  sudAtualizaErros();
+  sudContaVagas();
+  sudTInicio = millis();
+  sudEstado = SUD_E_JOGO;
+}
+
+void sudNovoJogo() {
+  sudDesenhaGerando();
+  sudGerar();
+}
+
+void sudMoveCursor(int dir) {
+  int NN = sudN * sudN;
+  for (int passo = 1; passo <= NN; passo++) {
+    int idx = (((sudCursor + dir * passo) % NN) + NN) % NN;
+    if (!sudFixo[idx]) { sudCursor = idx; return; }
+  }
+}
+
+// ---------------- desenho do tabuleiro ----------------
+// desenha o numero d dentro da casa cujo canto interno e (cx,cy)
+void sudDesenhaNum(int cx, int cy, int d, uint16_t cor) {
+  int inner = sudPasso - 1;
+  if (sudPasso >= 13) {                  // 4x4: numeros grandes (fonte 3x5 ampliada)
+    int ox = cx + (inner - 6) / 2, oy = cy + (inner - 10) / 2;
+    for (int r = 0; r < 5; r++)
+      for (int c = 0; c < 3; c++)
+        if (FONTE3X5[d][r] & (4 >> c)) display.fillRect(ox + c * 2, oy + r * 2, 2, 2, cor);
+  } else if (sudPasso >= 9) {            // 6x6: fonte normal
+    display.setTextColor(cor);
+    display.setCursor(cx + (inner - 5) / 2, cy + (inner - 7) / 2);
+    display.print(d);
+    display.setTextColor(WHITE);
+  } else {                               // 9x9: fonte minuscula
+    int ox = cx + (inner - 3) / 2, oy = cy + (inner - 5) / 2;
+    for (int r = 0; r < 5; r++)
+      for (int c = 0; c < 3; c++)
+        if (FONTE3X5[d][r] & (4 >> c)) display.drawPixel(ox + c, oy + r, cor);
+  }
+}
+
+void sudDesenha(unsigned long t) {
+  int N = sudN, p = sudPasso;
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  // estrelinhas do painel
+  ceuEstrelado(112, 1, 127, 9, 3, 21);
+  ceuEstrelado(122, 33, 127, 62, 3, 22);
+
+  // grade (linhas das caixas cheias, linhas das casas pontilhadas)
+  for (int i = 0; i <= N; i++) {
+    int x = sudX0 + i * p;
+    int y = sudY0 + i * p;
+    if (i % sudBC == 0) display.drawFastVLine(x, sudY0, N * p + 1, WHITE);
+    else for (int yy = sudY0; yy <= sudY0 + N * p; yy += 2) display.drawPixel(x, yy, WHITE);
+    if (i % sudBR == 0) display.drawFastHLine(sudX0, y, N * p + 1, WHITE);
+    else for (int xx = sudX0; xx <= sudX0 + N * p; xx += 2) display.drawPixel(xx, y, WHITE);
+  }
+
+  // numeros
+  for (int i = 0; i < N * N; i++) {
+    int cx = sudX0 + (i % N) * p + 1;
+    int cy = sudY0 + (i / N) * p + 1;
+    int v = (sudEditando && i == sudCursor) ? sudValorEdit : sudGrade[i];
+    if (v <= 0) continue;
+    bool inv = !sudFixo[i];                          // o que voce escreveu fica "branquinho"
+    bool pisca = sudErro[i] && sudErroT[i] != 0 && (t - sudErroT[i] > SUD_ATRASO_ERRO) && ((t / 300) % 2 == 0);
+    if (pisca) inv = !inv;
+    if (inv) {
+      display.fillRect(cx, cy, p - 1, p - 1, WHITE);
+      sudDesenhaNum(cx, cy, v, BLACK);
+    } else {
+      sudDesenhaNum(cx, cy, v, WHITE);
+    }
+  }
+
+  // cursor piscando (mais rapido quando esta editando)
+  if (sudEstado == SUD_E_JOGO) {
+    int cx = sudX0 + (sudCursor % N) * p + 1;
+    int cy = sudY0 + (sudCursor / N) * p + 1;
+    unsigned long per = sudEditando ? 140 : 380;
+    if ((t / per) % 2 == 0) display.fillRect(cx, cy, p - 1, p - 1, INVERSE);
+  }
+
+  // painel
+  char buf[24];
+  display.setCursor(72, 1);
+  display.print("SUDOKU");
+  snprintf(buf, sizeof(buf), "%dx%d %s", N, N, SUD_NOME_DIF[sudDif]);
+  display.setCursor(72, 11);
+  display.print(buf);
+
+  unsigned long fim = t;
+  if (sudEstado == SUD_E_VIT) fim = sudTFim;
+  else if (sudEstado == SUD_E_SAIR) fim = sudTPausaIni;
+  int segs = (int)((fim - sudTInicio) / 1000);
+  char tb[8];
+  sudFormataTempo(tb, sizeof(tb), segs);
+  display.setCursor(72, 21);
+  display.print(tb);
+
+  snprintf(buf, sizeof(buf), "vagas %d", sudVagas);
+  display.setCursor(72, 31);
+  display.print(buf);
+
+  display.setCursor(72, 44);
+  display.print(sudEditando ? "UP/DN:+/-" : "UP/DN:ir");
+  display.setCursor(72, 54);
+  display.print(sudEditando ? "OK:salvar" : "OK:editar");
+
+  bool piscando = (t % 3000) < 130;
+  desenhaPurinMini(108, 18, 0, piscando);
+}
+
+// ---------------- telas de escolha ----------------
+// mini tabuleiro enfeite (centro em cx,cy)
+void sudMiniGrade(int cx, int cy, int tam, uint16_t cor) {
+  int N  = (tam == 0) ? 4 : (tam == 1) ? 6 : 9;
+  int br = (tam == 2) ? 3 : 2;
+  int bc = (tam == 0) ? 2 : 3;
+  int p  = (tam == 0) ? 5 : (tam == 1) ? 3 : 2;
+  int lado = N * p;
+  int x0 = cx - lado / 2, y0 = cy - lado / 2;
+  for (int i = 0; i <= N; i++) {
+    int x = x0 + i * p, y = y0 + i * p;
+    if (i % bc == 0) display.drawFastVLine(x, y0, lado + 1, cor);
+    else if (p >= 3) for (int yy = y0; yy <= y0 + lado; yy += 2) display.drawPixel(x, yy, cor);
+    if (i % br == 0) display.drawFastHLine(x0, y, lado + 1, cor);
+    else if (p >= 3) for (int xx = x0; xx <= x0 + lado; xx += 2) display.drawPixel(xx, y, cor);
+  }
+  for (int r = 0; r < N; r++) {                      // "numerinhos"
+    for (int c = 0; c < N; c++) {
+      if ((r * 3 + c * 5) % 4 != 0) continue;
+      int px = x0 + c * p + p / 2, py = y0 + r * p + p / 2;
+      if (p >= 5) display.fillRect(px - 1, py - 1, 2, 2, cor);
+      else        display.drawPixel(px, py, cor);
+    }
+  }
+}
+
+void sudDesenhaEscolhaTam(unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  ceuEstrelado(0, 10, 127, 12, 5, 31);
+  ceuEstrelado(0, 61, 127, 63, 6, 32);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(46, 1);
+  display.print("SUDOKU");
+  display.setTextColor(WHITE);
+
+  const char* nomes[3] = { "4x4", "6x6", "9x9" };
+  for (int i = 0; i < 3; i++) {
+    int x = 3 + i * 42, y = 13, w = 38, h = 36;
+    bool sel = (i == sudTamSel);
+    uint16_t cor = sel ? BLACK : WHITE;
+    if (sel) display.fillRoundRect(x, y, w, h, 4, WHITE);
+    else     display.drawRoundRect(x, y, w, h, 4, WHITE);
+    sudMiniGrade(x + w / 2, y + 14, i, cor);
+    display.setTextColor(cor);
+    display.setCursor(x + (w - 18) / 2, y + 27);
+    display.print(nomes[i]);
+    display.setTextColor(WHITE);
+    if (sel) {                                        // brilhinhos nos cantinhos
+      if ((t / 300) % 2 == 0) brilhinho(x - 2, y + 18, 1);
+      else                    brilhinho(x + w + 1, y + 18, 1);
+    }
+  }
+
+  char buf[24];
+  int melhor = sudMelhorTam(sudTamSel);
+  if (melhor > 0) {
+    char tb[8];
+    sudFormataTempo(tb, sizeof(tb), melhor);
+    snprintf(buf, sizeof(buf), "melhor %s", tb);
+  } else {
+    snprintf(buf, sizeof(buf), "sem recorde ainda");
+  }
+  textoCentralizado(buf, 53);
+  display.display();
+}
+
+void sudDesenhaEscolhaDif(unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  ceuEstrelado(0, 11, 4, 51, 3, 34);
+  ceuEstrelado(123, 11, 127, 51, 3, 35);
+  ceuEstrelado(0, 62, 100, 63, 4, 37);
+
+  char buf[24];
+  int N = (sudTamSel == 0) ? 4 : (sudTamSel == 1) ? 6 : 9;
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  snprintf(buf, sizeof(buf), "NIVEL DO %dx%d", N, N);
+  display.setCursor((SCREEN_W - (int)strlen(buf) * 6) / 2, 1);
+  display.print(buf);
+  display.setTextColor(WHITE);
+
+  for (int i = 0; i < 3; i++) {
+    int y = 13 + i * 13;
+    bool sel = (i == sudDifSel);
+    uint16_t cor = sel ? BLACK : WHITE;
+    if (sel) display.fillRoundRect(6, y, 116, 12, 3, WHITE);
+    else     display.drawRoundRect(6, y, 116, 12, 3, WHITE);
+
+    display.setTextColor(cor);
+    display.setCursor(12, y + 2);
+    display.print(SUD_ROT_DIF[i]);
+
+    for (int k = 0; k < 3; k++) {                      // 1, 2 ou 3 brilhinhos
+      int bx = 64 + k * 9, by = y + 6;
+      if (k <= i) {
+        int r = (sel && ((t / 300) + k) % 2 == 0) ? 3 : 2;
+        brilhinhoCor(bx, by, r, cor);
+      } else {
+        display.drawPixel(bx, by, cor);
+      }
+    }
+
+    int m = sudMelhor[sudTamSel * 3 + i];
+    if (m > 0) sudFormataTempo(buf, sizeof(buf), m);
+    else       snprintf(buf, sizeof(buf), "--:--");
+    display.setCursor(90, y + 2);
+    display.print(buf);
+    display.setTextColor(WHITE);
+  }
+
+  display.setCursor(2, 56);
+  display.print("BACK: voltar");
+  desenhaPurinMini(112, 52, 0, (t % 3000) < 130);
+  display.display();
+}
+
+// ---------------- tela final ----------------
+void sudDesenhaFim(unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  ceuEstrelado(0, 0, 46, 63, 8, 4);
+
+  if (sudNovoRec) {
+    desenhaConfete(t);
+    desenhaBmp7(8, 22 - (int)((t / 120) % 8), BMP_CORACAO, 6, 1);
+    desenhaBmp7(41, 28 - (int)((t / 150) % 8), BMP_CORACAO, 6, 1);
+    float fase = (t % 700) / 700.0f;
+    int pulo = (int)(4 * fase * (1 - fase) * 8);           // Purin pulando de alegria
+    desenhaPurin(24, 58, pulo, 0);
+  } else {
+    desenhaPurin(24, 58, 0, 0);
+  }
+
+  char buf[24], tb[8];
+  display.setCursor(52, 6);
+  display.print("RESOLVIDO!");
+  int N = sudN;
+  snprintf(buf, sizeof(buf), "%dx%d %s", N, N, SUD_NOME_DIF[sudDif]);
+  display.setCursor(52, 16);
+  display.print(buf);
+
+  sudFormataTempo(tb, sizeof(tb), sudSegs);
+  snprintf(buf, sizeof(buf), "tempo %s", tb);
+  display.setCursor(52, 28);
+  display.print(buf);
+
+  if (sudNovoRec) {
+    if ((t / 250) % 2 == 0) {
+      display.setCursor(52, 37);
+      display.print("* RECORDE *");
+    }
+  } else {
+    sudFormataTempo(tb, sizeof(tb), sudMelhor[sudTam * 3 + sudDif]);
+    snprintf(buf, sizeof(buf), "melhor %s", tb);
+    display.setCursor(52, 37);
+    display.print(buf);
+  }
+  display.setCursor(52, 46); display.print("OK: de novo");
+  display.setCursor(52, 55); display.print("BACK: sair");
+  display.display();
+}
+
+// ---------------- icone no Game Center ----------------
+void sudMiniDigito(int x, int y, int d) {
+  for (int r = 0; r < 5; r++)
+    for (int c = 0; c < 3; c++)
+      if (FONTE3X5[d][r] & (4 >> c)) display.drawPixel(x + c, y + r, WHITE);
+}
+
+void sudIconeCard() {
+  unsigned long t = millis();
+  const int x0 = 54, y0 = 26;                         // grade 3x3 de 21x21
+  display.drawRoundRect(x0 - 2, y0 - 2, 25, 25, 3, WHITE);
+  display.drawFastVLine(x0 + 7, y0, 21, WHITE);
+  display.drawFastVLine(x0 + 14, y0, 21, WHITE);
+  display.drawFastHLine(x0, y0 + 7, 21, WHITE);
+  display.drawFastHLine(x0, y0 + 14, 21, WHITE);
+
+  const int digitos[9] = { 3, 0, 1, 0, 0, 0, 2, 0, 3 };
+  for (int i = 0; i < 9; i++) {
+    int cx = x0 + (i % 3) * 7 + 2;
+    int cy = y0 + (i / 3) * 7 + 1;
+    int d = digitos[i];
+    if (i == 4) d = 1 + (int)((t / 900) % 3);          // a casa do meio troca de numero
+    if (d > 0) sudMiniDigito(cx, cy, d);
+  }
+  if ((t / 350) % 2 == 0) display.fillRect(x0 + 8, y0 + 8, 6, 6, INVERSE);   // cursorzinho
+
+  if ((t / 400) % 2 == 0) { brilhinho(45, 29, 1); brilhinho(83, 45, 2); }
+  else                    { brilhinho(46, 45, 2); brilhinho(82, 29, 1); }
+}
+
+// ---------------- tela principal do Sudoku ----------------
+void sudTela() {
+  ultimaAtividade = millis();
+  unsigned long t = millis();
+  bool bu = clicou(bUp, true);
+  bool bd = clicou(bDown, true);
+  bool bo = clicou(bOk, false);
+  bool bb = clicou(bBack, false);
+
+  // ----- escolher tamanho -----
+  if (sudEstado == SUD_E_TAM) {
+    if (bu) { sudTamSel = (sudTamSel + 2) % 3; somTique(); }
+    if (bd) { sudTamSel = (sudTamSel + 1) % 3; somTique(); }
+    if (bo) { somConfirma(); sudEstado = SUD_E_DIF; return; }
+    if (bb) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+    sudDesenhaEscolhaTam(t);
+    return;
+  }
+
+  // ----- escolher nivel -----
+  if (sudEstado == SUD_E_DIF) {
+    if (bu) { sudDifSel = (sudDifSel + 2) % 3; somTique(); }
+    if (bd) { sudDifSel = (sudDifSel + 1) % 3; somTique(); }
+    if (bo) {
+      somConfirma();
+      sudConfigura(sudTamSel, sudDifSel);
+      sudNovoJogo();
+      return;
+    }
+    if (bb) { somVoltar(); sudEstado = SUD_E_TAM; return; }
+    sudDesenhaEscolhaDif(t);
+    return;
+  }
+
+  // ----- tela final -----
+  if (sudEstado == SUD_E_FIM) {
+    if (t - sudTFim > 700) {                           // evita apertar sem querer
+      if (bo) { somConfirma(); sudNovoJogo(); return; }
+      if (bb) { somVoltar(); sudEstado = SUD_E_TAM; return; }
+    }
+    sudDesenhaFim(t - sudTFim);
+    return;
+  }
+
+  // ----- comemorando -----
+  if (sudEstado == SUD_E_VIT) {
+    if (t - sudTFim > 1400) {
+      sudEstado = SUD_E_FIM;
+      sudTFim = t;
+      if (sudNovoRec) somRecorde();
+      return;
+    }
+    sudDesenha(t);
+    desenhaConfete(t - sudTFim);
+    display.display();
+    return;
+  }
+
+  // ----- "quer sair?" -----
+  if (sudEstado == SUD_E_SAIR) {
+    if (bo) { somVoltar(); sudEstado = SUD_E_TAM; return; }
+    if (bb) {                                          // continua: desconta o tempo parado
+      sudTInicio += (t - sudTPausaIni);
+      sudEstado = SUD_E_JOGO;
+      somConfirma();
+      return;
+    }
+    sudDesenha(t);
+    display.fillRoundRect(10, 18, 108, 28, 4, BLACK);
+    display.drawRoundRect(10, 18, 108, 28, 4, WHITE);
+    textoCentralizado("SAIR DO JOGO?", 23);
+    textoCentralizado("OK:sim BACK:nao", 34);
+    display.display();
+    return;
+  }
+
+  // ----- jogando -----
+  if (!sudEditando) {
+    if (bb) { somVoltar(); sudTPausaIni = t; sudEstado = SUD_E_SAIR; return; }
+    if (bu) { sudMoveCursor(-1); somTique(); }
+    if (bd) { sudMoveCursor(+1); somTique(); }
+    if (bo) { somConfirma(); sudEditando = true; sudValorEdit = sudGrade[sudCursor]; }
+  } else {
+    if (bb) { somVoltar(); sudEditando = false; }
+    if (bu) { sudValorEdit = (sudValorEdit + 1) % (sudN + 1); somTique(); }
+    if (bd) { sudValorEdit = (sudValorEdit + sudN) % (sudN + 1); somTique(); }
+    if (bo) {
+      sudGrade[sudCursor] = sudValorEdit;
+      sudEditando = false;
+      somConfirma();
+      sudAtualizaErros();
+      sudContaVagas();
+      if (sudVagas == 0 && !sudTemErro()) {            // resolvido!
+        sudTFim = t;
+        sudSegs = (int)((t - sudTInicio) / 1000);
+        if (sudSegs < 1) sudSegs = 1;
+        int idx = sudTam * 3 + sudDif;
+        sudNovoRec = (sudMelhor[idx] == 0 || sudSegs < sudMelhor[idx]);
+        if (sudNovoRec) {
+          sudMelhor[idx] = sudSegs;
+          char k[8];
+          snprintf(k, sizeof(k), "sud%d", idx);
+          preferencias.putInt(k, sudSegs);
+        }
+        sudEstado = SUD_E_VIT;
+      }
+    }
+  }
+  sudDesenha(t);
+  display.display();
 }
 
 
@@ -4124,6 +4841,7 @@ void loop() {
     case TELA_PONG:       telaPong();      break;
     case TELA_VELHA_MENU: vhTelaMenu(); break;
     case TELA_VELHA_JOGO: vhTelaJogo(); break;
+    case TELA_SUDOKU: sudTela(); break;
 
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
