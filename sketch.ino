@@ -34,6 +34,8 @@ const char* FUSO = "<-03>3";
 // Mude pra false se quiser o desenho do hemisferio norte.
 #define HEMISFERIO_SUL true
 
+int jogoSel = 0;
+
 // ---------------- DISPLAY ----------------
 #define SCREEN_W 128
 #define SCREEN_H 64
@@ -51,6 +53,9 @@ enum Tela {
   TELA_CONFIGURACOES,
   TELA_CFG_TELA,
   TELA_CFG_SOM,
+  TELA_JOGOS_MENU,
+  TELA_DINO,
+  TELA_PONG,
 };
 
 Tela telaAtual = TELA_BOAS_VINDAS;
@@ -1444,7 +1449,11 @@ void atualizaHorarioPet() {
     petHorarioValido = true;
   }
 }
-
+void abrirMenuJogos() {
+  carregarRecordes();
+  jogoSel = 0;
+  telaAtual = TELA_JOGOS_MENU;
+}
 
 void telaMenu() {
   unsigned long t = millis();
@@ -1482,6 +1491,11 @@ void telaMenu() {
       petGirando = false;
       tPetQuarto = millis();
       telaAtual = TELA_PET_QUARTO;
+      return;
+    }
+    if (selecionado == 3) {            // MINI JOGOS
+      esperaSoltar();
+      abrirMenuJogos();
       return;
     }
     avisoAte = millis() + 1200;        // os outros modulos ainda nao existem
@@ -2688,6 +2702,631 @@ void telaDescanso() {
   display.display();
 }
 
+// ============================================================
+//  MINI JOGOS - etapa 1: base + Dino Purin + Pong
+//  (nao mude a ordem: os tipos precisam vir antes das funcoes)
+// ============================================================
+#define N_JOGOS 5
+const char* NOMES_JOGOS[N_JOGOS] = { "Dino Purin", "Pong", "Jogo da Velha", "Memoria", "Sudoku" };
+
+enum EstadoJogo { JG_INTRO, JG_JOGANDO, JG_PONTO, JG_VITORIA, JG_FIM };
+
+
+unsigned long avisoJogoAte = 0;
+int recordes[N_JOGOS] = { 0, 0, 0, 0, 0 };   // 0 dino | 1 pong | 2 velha | 3 memoria | 4 sudoku
+
+// ---------------- RECORDES (salvos na memoria) ----------------
+void carregarRecordes() {
+  char chave[8];
+  for (int i = 0; i < N_JOGOS; i++) {
+    snprintf(chave, sizeof(chave), "rec%d", i);
+    recordes[i] = preferencias.getInt(chave, 0);
+  }
+}
+
+// Salva se for recorde. Devolve true quando bateu o recorde.
+bool registrarPontuacao(int jogo, int pontos) {
+  if (pontos > recordes[jogo]) {
+    recordes[jogo] = pontos;
+    char chave[8];
+    snprintf(chave, sizeof(chave), "rec%d", jogo);
+    preferencias.putInt(chave, pontos);
+    return true;
+  }
+  return false;
+}
+
+// ---------------- COMEMORACAO ----------------
+void somRecorde() {
+  tocaTom(1047, 90, false);
+  tocaTom(1319, 90, false);
+  tocaTom(1568, 90, false);
+  tocaTom(2093, 220, false);
+}
+
+// confete caindo (t = ms desde o inicio da comemoracao)
+void desenhaConfete(unsigned long t) {
+  for (int i = 0; i < 22; i++) {
+    int x = (i * 37 + 11) % 128;
+    int vel = 20 + (i * 7) % 25;                           // px por segundo
+    int y = (int)(((t * vel) / 1000 + i * 13) % 74) - 8;
+    if (y < 0 || y > 63) continue;
+    if (i % 3 == 0)      display.drawPixel(x, y, WHITE);
+    else if (i % 3 == 1) display.drawFastHLine(x, y, 2, WHITE);
+    else { display.drawPixel(x, y, WHITE); display.drawPixel(x + 1, y + 1, WHITE); }
+  }
+}
+
+// Tela de fim de jogo (serve para todos os jogos)
+void desenhaFimJogo(const char* rotulo, int pontos, bool novoRec, int recorde, unsigned long t) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  if (novoRec) {
+    desenhaConfete(t);
+    float fase = (t % 700) / 700.0f;
+    int pulo = (int)(4 * fase * (1 - fase) * 8);          // Purin pulando de alegria
+    desenhaPurin(24, 58, pulo, 0);
+    if ((t / 250) % 2 == 0) {
+      display.setCursor(52, 6);  display.print("NOVO");
+      display.setCursor(52, 16); display.print("RECORDE!");
+    }
+  } else {
+    desenhaPurin(24, 58, 0, 0);
+    display.setCursor(52, 6);  display.print("FIM DE");
+    display.setCursor(52, 16); display.print("JOGO");
+  }
+
+  display.setCursor(52, 28);
+  display.print(rotulo); display.print(": "); display.print(pontos);
+  if (!novoRec) {
+    display.setCursor(52, 37);
+    display.print("rec: "); display.print(recorde);
+  }
+  display.setCursor(52, 46); display.print("OK: de novo");
+  display.setCursor(52, 55); display.print("BACK: sair");
+  display.display();
+}
+
+// ============================================================
+//  DINO PURIN
+//  OK ou CIMA = pular | BAIXO (segurar) = abaixar / cair rapido
+// ============================================================
+#define DINO_MAX_OBS 3
+const int DINO_CHAO = 56;     // linha do chao
+const int DINO_X    = 14;     // posicao horizontal do Purin
+
+// tipos: 0 pequeno | 1 medio | 2 alto | 3 duplo | 4 passaro (voa baixo: abaixe!)
+const uint8_t OBS_W[5] = { 6, 8, 6, 14, 12 };
+const uint8_t OBS_H[5] = { 8, 12, 16, 8, 7 };
+const uint8_t OBS_Y[5] = { 0, 0, 0, 0, 14 };   // altura do "pe" do obstaculo acima do chao
+
+struct ObsDino { bool ativo; float x; uint8_t tipo; };
+ObsDino obsDino[DINO_MAX_OBS];
+
+EstadoJogo estadoDino = JG_INTRO;
+float dinoAltura = 0, dinoVel = 0;
+bool  dinoAbaixado = false;
+float dinoPontos = 0, dinoVelMundo = 80, dinoDistChao = 0, dinoProxima = 120;
+int   dinoMarco = 0;
+unsigned long dinoTMarco = 0, dinoUltimoQuadro = 0, dinoTFim = 0;
+bool  dinoNovoRecorde = false;
+int   dinoFinal = 0;
+
+void desenhaPurinCorrida(int x, int pesY, int frame, bool abaixado, bool noAr) {
+  if (abaixado) {
+    display.fillRoundRect(x - 2, pesY - 12, 18, 10, 4, BLACK);
+    display.drawRoundRect(x - 2, pesY - 12, 18, 10, 4, WHITE);
+    display.fillRoundRect(x + 1, pesY - 15, 12, 4, 2, WHITE);      // boina
+    display.drawPixel(x + 11, pesY - 8, WHITE);                    // olho
+    display.drawFastHLine(x + 7, pesY - 6, 2, WHITE);              // bochecha
+    display.fillRect(x + 1, pesY - 2, 4, 2, WHITE);                // patinhas
+    display.fillRect(x + 9, pesY - 2, 4, 2, WHITE);
+    return;
+  }
+  // corpo + cabeca
+  display.fillRoundRect(x + 1, pesY - 9, 12, 7, 2, BLACK);
+  display.drawRoundRect(x + 1, pesY - 9, 12, 7, 2, WHITE);
+  display.fillRoundRect(x - 1, pesY - 19, 16, 11, 4, BLACK);
+  display.drawRoundRect(x - 1, pesY - 19, 16, 11, 4, WHITE);
+  display.fillRoundRect(x + 1, pesY - 22, 12, 4, 2, WHITE);        // boina
+  display.drawFastVLine(x - 2, pesY - 16, 4, WHITE);               // orelha
+  display.drawPixel(x + 10, pesY - 14, WHITE);                     // olho
+  display.drawPixel(x + 13, pesY - 12, WHITE);                     // focinho
+  display.drawFastHLine(x + 7, pesY - 11, 2, WHITE);               // bochecha
+  // patinhas alternando (recolhidas no ar)
+  int a = noAr ? 1 : ((frame % 2 == 0) ? 1 : 0);
+  int b = noAr ? 1 : ((frame % 2 == 0) ? 0 : 1);
+  display.fillRect(x + 2, pesY - 2 - a, 4, 2, WHITE);
+  display.fillRect(x + 9, pesY - 2 - b, 4, 2, WHITE);
+}
+
+void desenhaObsDino(int i) {
+  int t = obsDino[i].tipo;
+  int x = (int)obsDino[i].x;
+  int h = OBS_H[t];
+  int y = (DINO_CHAO - OBS_Y[t]) - h;
+  switch (t) {
+    case 0: case 1: case 2:
+      display.fillRoundRect(x, y, OBS_W[t], h, 2, WHITE);
+      display.drawFastHLine(x + 1, y + h / 2, OBS_W[t] - 2, BLACK);
+      break;
+    case 3:
+      display.fillRoundRect(x, y, 6, h, 2, WHITE);
+      display.fillRoundRect(x + 8, y, 6, h, 2, WHITE);
+      break;
+    case 4: {
+      bool asaCima = ((millis() / 120) % 2 == 0);
+      display.fillRoundRect(x + 2, y + 2, 9, 4, 2, WHITE);          // corpo
+      display.drawFastHLine(x, y + 3, 2, WHITE);                    // bico
+      if (asaCima) display.drawLine(x + 5, y + 2, x + 8, y, WHITE);
+      else         display.drawLine(x + 5, y + 5, x + 8, y + 7, WHITE);
+      break;
+    }
+  }
+}
+
+void dinoGeraObstaculo() {
+  for (int i = 0; i < DINO_MAX_OBS; i++) {
+    if (obsDino[i].ativo) continue;
+    obsDino[i].ativo = true;
+    obsDino[i].x = SCREEN_W;
+    if (dinoPontos >= 120 && random(100) < 25) obsDino[i].tipo = 4;   // passaros depois dos 120 pts
+    else                                       obsDino[i].tipo = random(0, 4);
+    break;
+  }
+  dinoProxima = dinoVelMundo * 0.65f + random(30, 81) + 12;
+}
+
+void dinoComecar() {
+  dinoAltura = 0; dinoVel = 0; dinoAbaixado = false;
+  dinoPontos = 0; dinoVelMundo = 80; dinoDistChao = 0;
+  dinoMarco = 0; dinoProxima = 120;
+  for (int i = 0; i < DINO_MAX_OBS; i++) obsDino[i].ativo = false;
+  dinoUltimoQuadro = millis();
+  estadoDino = JG_JOGANDO;
+}
+
+void dinoTerminar() {
+  dinoFinal = (int)dinoPontos;
+  dinoNovoRecorde = registrarPontuacao(0, dinoFinal);
+  estadoDino = JG_FIM;
+  if (dinoNovoRecorde) somRecorde(); else somErro();
+  dinoTFim = millis();
+}
+
+void iniciaDino() {
+  estadoDino = JG_INTRO;
+  dinoUltimoQuadro = millis();
+}
+
+void dinoAtualiza(float dt) {
+  // ---- entrada ----
+  bool pediuPulo = false;
+  if (clicou(bOk, false)) pediuPulo = true;
+  if (clicou(bUp, false)) pediuPulo = true;
+  bool baixo = !digitalRead(PIN_BTN_DOWN);
+
+  if (pediuPulo && dinoAltura <= 0.01f && dinoVel <= 0.01f) {
+    dinoVel = 170;
+    tocaTom(1400, 10, false);
+  }
+
+  // ---- fisica do pulo ----
+  if (dinoAltura > 0 || dinoVel > 0) {
+    float g = baixo ? 1100.0f : 560.0f;            // segurar BAIXO = cai mais rapido
+    dinoVel -= g * dt;
+    dinoAltura += dinoVel * dt;
+    if (dinoAltura <= 0) { dinoAltura = 0; dinoVel = 0; }
+  }
+  dinoAbaixado = baixo && dinoAltura <= 0.01f;
+
+  // ---- cenario ----
+  float vel = 80.0f + dinoPontos * 0.12f;
+  if (vel > 175.0f) vel = 175.0f;
+  dinoVelMundo = vel;
+  float avanco = vel * dt;
+  dinoPontos += avanco / 10.0f;
+  dinoDistChao += avanco;
+
+  int marco = (int)dinoPontos / 100;
+  if (marco > dinoMarco) {
+    dinoMarco = marco;
+    dinoTMarco = millis();
+    tocaTom(1800, 30, false);
+  }
+
+  for (int i = 0; i < DINO_MAX_OBS; i++) {
+    if (!obsDino[i].ativo) continue;
+    obsDino[i].x -= avanco;
+    if (obsDino[i].x + OBS_W[obsDino[i].tipo] < 0) obsDino[i].ativo = false;
+  }
+  dinoProxima -= avanco;
+  if (dinoProxima <= 0) dinoGeraObstaculo();
+
+  // ---- colisao ----
+  int pesY = DINO_CHAO - (int)dinoAltura;
+  int px0 = DINO_X, px1 = DINO_X + 14, py0 = pesY - 19, py1 = pesY;
+  if (dinoAbaixado) { px0 = DINO_X - 1; px1 = DINO_X + 15; py0 = pesY - 12; }
+  for (int i = 0; i < DINO_MAX_OBS; i++) {
+    if (!obsDino[i].ativo) continue;
+    int t = obsDino[i].tipo;
+    int ox0 = (int)obsDino[i].x, ox1 = ox0 + OBS_W[t];
+    int oy1 = DINO_CHAO - OBS_Y[t], oy0 = oy1 - OBS_H[t];
+    if (px0 < ox1 - 1 && px1 > ox0 + 1 && py0 < oy1 - 1 && py1 > oy0 + 1) {
+      dinoTerminar();
+      return;
+    }
+  }
+}
+
+void dinoDesenha() {
+  unsigned long agora = millis();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  // placar (pisca um pouquinho a cada 100 pontos)
+  display.setCursor(0, 0);
+  display.print("REC "); display.print(recordes[0]);
+  if (agora - dinoTMarco > 600 || (agora / 100) % 2 == 0) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%05d", (int)dinoPontos);
+    display.setCursor(98, 0);
+    display.print(buf);
+  }
+
+  // nuvens (andam devagar)
+  int n1 = SCREEN_W - ((int)(dinoDistChao * 0.2f) % 170);
+  int n2 = SCREEN_W - (((int)(dinoDistChao * 0.2f) + 85) % 170);
+  display.drawRoundRect(n1, 16, 16, 5, 2, WHITE);
+  display.drawRoundRect(n2, 26, 12, 4, 2, WHITE);
+
+  // chao rolando
+  display.drawFastHLine(0, DINO_CHAO + 1, SCREEN_W, WHITE);
+  for (int i = 0; i < 12; i++) {
+    int gx = (((i * 41 - (int)dinoDistChao) % 128) + 128) % 128;
+    display.drawFastHLine(gx, DINO_CHAO + 3 + (i % 3) * 2, 1 + (i % 3), WHITE);
+  }
+
+  for (int i = 0; i < DINO_MAX_OBS; i++) if (obsDino[i].ativo) desenhaObsDino(i);
+
+  int pesY = DINO_CHAO - (int)dinoAltura;
+  desenhaPurinCorrida(DINO_X, pesY, (int)(dinoDistChao / 12), dinoAbaixado, dinoAltura > 0);
+  display.display();
+}
+
+void dinoDesenhaIntro() {
+  unsigned long t = millis();
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(34, 1);
+  display.print("DINO PURIN");
+  display.setTextColor(WHITE);
+
+  display.setCursor(36, 15); display.print("OK/CIMA: pula");
+  display.setCursor(36, 25); display.print("BAIXO: abaixa");
+  display.setCursor(36, 37); display.print("recorde: "); display.print(recordes[0]);
+
+  display.drawFastHLine(0, 51, SCREEN_W, WHITE);
+  desenhaPurinCorrida(10, 50, (int)(t / 150), false, false);
+
+  if ((t / 600) % 2 == 0) {
+    display.setCursor(19, 55);
+    display.print("[ OK p/ jogar ]");
+  }
+  display.display();
+}
+
+void telaDino() {
+  ultimaAtividade = millis();                      // jogando = acordado
+  unsigned long agora = millis();
+  float dt = (agora - dinoUltimoQuadro) / 1000.0f;
+  if (dt > 0.04f) dt = 0.04f;
+  dinoUltimoQuadro = agora;
+
+  if (estadoDino == JG_INTRO) {
+    bool ok = clicou(bOk, false);
+    bool voltar = clicou(bBack, false);
+    if (voltar) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+    if (ok)     { somConfirma(); dinoComecar(); return; }
+    dinoDesenhaIntro();
+  }
+  else if (estadoDino == JG_JOGANDO) {
+    if (clicou(bBack, false)) { dinoTerminar(); return; }
+    dinoAtualiza(dt);
+    if (estadoDino == JG_JOGANDO) dinoDesenha();
+  }
+  else {  // JG_FIM
+    bool ok = clicou(bOk, false);
+    bool voltar = clicou(bBack, false);
+    if (agora - dinoTFim > 700) {                  // evita apertar sem querer
+      if (voltar) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+      if (ok)     { somConfirma(); dinoComecar(); return; }
+    }
+    desenhaFimJogo("pts", dinoFinal, dinoNovoRecorde, recordes[0], agora - dinoTFim);
+  }
+}
+
+// ============================================================
+//  PONG (voce na esquerda x computador)
+//  CIMA/BAIXO (segurar) = mover | ganhe 5 pontos = 1 vitoria
+//  Pontuacao = vitorias SEGUIDAS (o computador fica mais rapido)
+// ============================================================
+const int PONG_TOPO  = 10;     // primeira linha da quadra
+const int PONG_RAQ_H = 14;
+const int PONG_RAQ_W = 3;
+const int PONG_X_JOG = 4;
+const int PONG_X_PC  = 121;
+
+EstadoJogo estadoPong = JG_INTRO;
+float pongJogY = 29, pongPcY = 29;
+float pongBolaX = 63, pongBolaY = 35, pongBolaVX = 0, pongBolaVY = 0;
+int   pongPlacarJog = 0, pongPlacarPc = 0, pongSequencia = 0;
+float pongErroPc = 0;
+bool  pongUltimoPontoJog = true;
+const char* pongMsg = "";
+unsigned long pongTEvento = 0, pongUltimoQuadro = 0;
+bool  pongNovoRecorde = false;
+int   pongFinal = 0;
+
+void pongNovaPartida() {
+  pongPlacarJog = 0; pongPlacarPc = 0;
+  pongJogY = 29; pongPcY = 29;
+  pongBolaX = 63; pongBolaY = 35; pongBolaVX = 0; pongBolaVY = 0;
+  pongMsg = "PRONTO?";
+  pongTEvento = millis();
+  estadoPong = JG_PONTO;
+}
+
+void pongSacar() {
+  float v = 75.0f + pongSequencia * 4.0f;
+  if (v > 100.0f) v = 100.0f;
+  pongBolaX = 63; pongBolaY = 35;
+  pongBolaVX = pongUltimoPontoJog ? v : -v;               // saca para quem perdeu o ponto
+  pongBolaVY = (random(2) ? 1 : -1) * (float)random(15, 46);
+  pongErroPc = (float)random(-9, 10);
+  estadoPong = JG_JOGANDO;
+}
+
+void pongComecar() {
+  pongSequencia = 0;
+  pongUltimoPontoJog = true;
+  pongNovaPartida();
+}
+
+void pongTerminar() {
+  pongFinal = pongSequencia;
+  pongNovoRecorde = registrarPontuacao(1, pongFinal);
+  estadoPong = JG_FIM;
+  if (pongNovoRecorde) somRecorde(); else somErro();
+  pongTEvento = millis();
+}
+
+void iniciaPong() {
+  estadoPong = JG_INTRO;
+  pongUltimoQuadro = millis();
+}
+
+void pongMoveJogador(float dt) {
+  if (!digitalRead(PIN_BTN_UP))   pongJogY -= 75.0f * dt;
+  if (!digitalRead(PIN_BTN_DOWN)) pongJogY += 75.0f * dt;
+  pongJogY = constrain(pongJogY, (float)PONG_TOPO, (float)(64 - PONG_RAQ_H));
+}
+
+void pongMovePc(float dt) {
+  float velMax = 42.0f + pongSequencia * 4.0f;            // fica mais rapido a cada vitoria
+  if (velMax > 85.0f) velMax = 85.0f;
+  float centro = pongPcY + PONG_RAQ_H / 2.0f;
+  float alvo = 36.0f;                                     // bola longe: volta ao centro
+  if (pongBolaVX > 0 && pongBolaX > 40) alvo = pongBolaY + 1.5f + pongErroPc;
+  float dif = alvo - centro;
+  float passo = velMax * dt;
+  if (dif > 2.0f)       pongPcY += (passo < dif ? passo : dif);
+  else if (dif < -2.0f) pongPcY -= (passo < -dif ? passo : -dif);
+  pongPcY = constrain(pongPcY, (float)PONG_TOPO, (float)(64 - PONG_RAQ_H));
+}
+
+void pongRebate(float raqY, int direcao) {
+  float rel = ((pongBolaY + 1.5f) - (raqY + PONG_RAQ_H / 2.0f)) / (PONG_RAQ_H / 2.0f + 1.5f);
+  rel = constrain(rel, -1.0f, 1.0f);
+  float vel = fabsf(pongBolaVX) * 1.05f;                  // acelera a cada rebatida
+  if (vel > 140.0f) vel = 140.0f;
+  pongBolaVX = direcao * vel;
+  pongBolaVY = rel * 80.0f;                               // o angulo depende de onde bateu
+  tocaTom(1100, 10, false);
+}
+
+void pongPonto(bool jogadorMarcou) {
+  if (jogadorMarcou) pongPlacarJog++; else pongPlacarPc++;
+  pongUltimoPontoJog = jogadorMarcou;
+  pongTEvento = millis();
+
+  if (jogadorMarcou) tocaTom(1568, 50, false); else tocaTom(300, 110, false);
+
+  if (pongPlacarJog >= 5) {
+    pongSequencia++;
+    pongMsg = "VITORIA!";
+    estadoPong = JG_VITORIA;
+    tocaTom(1319, 80, false); tocaTom(1568, 80, false); tocaTom(2093, 160, false);
+  } else if (pongPlacarPc >= 5) {
+    pongTerminar();
+  } else {
+    pongMsg = jogadorMarcou ? "PONTO!" : "PONTO DO PC";
+    estadoPong = JG_PONTO;
+  }
+}
+
+void pongMoveBola(float dt) {
+  pongBolaX += pongBolaVX * dt;
+  pongBolaY += pongBolaVY * dt;
+
+  if (pongBolaY < PONG_TOPO)  { pongBolaY = PONG_TOPO;  pongBolaVY = -pongBolaVY; tocaTom(700, 6, false); }
+  if (pongBolaY > 64 - 3)     { pongBolaY = 64 - 3;     pongBolaVY = -pongBolaVY; tocaTom(700, 6, false); }
+
+  // raquete do jogador
+  if (pongBolaVX < 0 && pongBolaX <= PONG_X_JOG + PONG_RAQ_W && pongBolaX + 3 >= PONG_X_JOG &&
+      pongBolaY + 3 >= pongJogY && pongBolaY <= pongJogY + PONG_RAQ_H) {
+    pongBolaX = PONG_X_JOG + PONG_RAQ_W;
+    pongRebate(pongJogY, +1);
+    pongErroPc = (float)random(-9, 10);                   // o PC "erra a mira" um pouquinho
+  }
+  // raquete do computador
+  if (pongBolaVX > 0 && pongBolaX + 3 >= PONG_X_PC && pongBolaX <= PONG_X_PC + PONG_RAQ_W &&
+      pongBolaY + 3 >= pongPcY && pongBolaY <= pongPcY + PONG_RAQ_H) {
+    pongBolaX = PONG_X_PC - 3;
+    pongRebate(pongPcY, -1);
+  }
+
+  if (pongBolaX < -4)            pongPonto(false);
+  else if (pongBolaX > SCREEN_W) pongPonto(true);
+}
+
+void pongDesenha() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+
+  display.setCursor(0, 0);   display.print("VOCE "); display.print(pongPlacarJog);
+  display.setCursor(104, 0); display.print("PC ");   display.print(pongPlacarPc);
+  char buf[10];
+  snprintf(buf, sizeof(buf), "SEQ %d", pongSequencia);
+  display.setCursor((SCREEN_W - (int)strlen(buf) * 6) / 2, 0);
+  display.print(buf);
+
+  display.drawFastHLine(0, PONG_TOPO - 1, SCREEN_W, WHITE);
+  for (int y = PONG_TOPO + 2; y < 64; y += 6) display.drawFastVLine(64, y, 3, WHITE);
+
+  display.fillRect(PONG_X_JOG, (int)pongJogY, PONG_RAQ_W, PONG_RAQ_H, WHITE);
+  display.fillRect(PONG_X_PC,  (int)pongPcY,  PONG_RAQ_W, PONG_RAQ_H, WHITE);
+  display.fillRect((int)pongBolaX, (int)pongBolaY, 3, 3, WHITE);
+
+  if (estadoPong == JG_PONTO || estadoPong == JG_VITORIA) {
+    int w = (int)strlen(pongMsg) * 6 + 10;
+    int x = (SCREEN_W - w) / 2;
+    display.fillRect(x, 26, w, 13, BLACK);
+    display.drawRect(x, 26, w, 13, WHITE);
+    textoCentralizado(pongMsg, 29);
+  }
+  display.display();
+}
+
+void pongDesenhaIntro() {
+  unsigned long t = millis();
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(52, 1);
+  display.print("PONG");
+  display.setTextColor(WHITE);
+
+  display.setCursor(13, 14); display.print("CIMA/BAIXO: mover");
+  display.setCursor(22, 24); display.print("ganhe 5 pontos");
+  display.setCursor(7, 34);  display.print("venca em sequencia!");
+  display.setCursor(34, 45); display.print("recorde: "); display.print(recordes[1]);
+
+  if ((t / 600) % 2 == 0) {
+    display.setCursor(19, 55);
+    display.print("[ OK p/ jogar ]");
+  }
+  display.display();
+}
+
+void telaPong() {
+  ultimaAtividade = millis();
+  unsigned long agora = millis();
+  float dt = (agora - pongUltimoQuadro) / 1000.0f;
+  if (dt > 0.04f) dt = 0.04f;
+  pongUltimoQuadro = agora;
+
+  if (estadoPong == JG_INTRO) {
+    bool ok = clicou(bOk, false);
+    bool voltar = clicou(bBack, false);
+    if (voltar) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+    if (ok)     { somConfirma(); pongComecar(); return; }
+    pongDesenhaIntro();
+  }
+  else if (estadoPong == JG_FIM) {
+    bool ok = clicou(bOk, false);
+    bool voltar = clicou(bBack, false);
+    if (agora - pongTEvento > 700) {
+      if (voltar) { somVoltar(); esperaSoltar(); telaAtual = TELA_JOGOS_MENU; return; }
+      if (ok)     { somConfirma(); pongComecar(); return; }
+    }
+    desenhaFimJogo("seq", pongFinal, pongNovoRecorde, recordes[1], agora - pongTEvento);
+  }
+  else {  // JOGANDO, PONTO ou VITORIA
+    if (clicou(bBack, false)) { pongTerminar(); return; }
+    pongMoveJogador(dt);
+
+    if (estadoPong == JG_JOGANDO) {
+      pongMovePc(dt);
+      pongMoveBola(dt);
+    } else if (estadoPong == JG_PONTO) {
+      if (agora - pongTEvento > 900) pongSacar();
+    } else if (estadoPong == JG_VITORIA) {
+      if (agora - pongTEvento > 1500) pongNovaPartida();
+    }
+    if (estadoPong != JG_FIM) pongDesenha();
+  }
+}
+
+// ============================================================
+//  MENU DOS MINI JOGOS
+// ============================================================
+void abrirJogo(int i) {
+  switch (i) {
+    case 0: iniciaDino(); telaAtual = TELA_DINO; break;
+    case 1: iniciaPong(); telaAtual = TELA_PONG; break;
+    default: avisoJogoAte = millis() + 1200; break;     // os outros chegam na etapa 2
+  }
+}
+
+void telaJogosMenu() {
+  if (clicou(bUp, true))    { jogoSel = (jogoSel + N_JOGOS - 1) % N_JOGOS; somTique(); }
+  if (clicou(bDown, true))  { jogoSel = (jogoSel + 1) % N_JOGOS; somTique(); }
+  if (clicou(bOk, false))   { somConfirma(); abrirJogo(jogoSel); return; }
+  if (clicou(bBack, false)) { somVoltar(); esperaSoltar(); telaAtual = TELA_MENU; return; }
+
+  unsigned long t = millis();
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  display.fillRect(0, 0, SCREEN_W, 10, WHITE);
+  display.setTextColor(BLACK);
+  if (t < avisoJogoAte) {
+    if ((t / 200) % 2 == 0) { display.setCursor(25, 1); display.print("[ em breve! ]"); }
+  } else {
+    display.setCursor(34, 1);
+    display.print("MINI JOGOS");
+  }
+
+  for (int i = 0; i < N_JOGOS; i++) {
+    int y = 11 + i * 10;
+    bool sel = (i == jogoSel);
+    if (sel) display.fillRect(0, y, SCREEN_W, 10, WHITE);
+    display.setTextColor(sel ? BLACK : WHITE);
+    if (sel) { display.setCursor(3, y + 1); display.print(">"); }
+    display.setCursor(12, y + 1);
+    display.print(NOMES_JOGOS[i]);
+
+    if (recordes[i] > 0) {
+      char buf[12];
+      snprintf(buf, sizeof(buf), "%d", recordes[i]);
+      display.setCursor(125 - (int)strlen(buf) * 6, y + 1);
+      display.print(buf);
+    }
+  }
+  display.setTextColor(WHITE);
+  display.display();
+}
+
 // ---------------- SETUP / LOOP ----------------
 void setup() {
   Serial.begin(115200);
@@ -2778,6 +3417,9 @@ void loop() {
       controlarConfigSom();
       telaConfigSom();
       break;
+    case TELA_JOGOS_MENU: telaJogosMenu(); break;
+    case TELA_DINO:       telaDino();      break;
+    case TELA_PONG:       telaPong();      break;
   }
   delay(5);   // pequeno para a animacao do menu ficar fluida
 }
